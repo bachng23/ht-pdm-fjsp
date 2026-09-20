@@ -66,6 +66,7 @@ class HTPdmFjspEnv(gym.Env):
         *,
         config_path: str | Path | None = None,
         env_config: GymEnvConfig | None = None,
+        include_action_context: bool = False,
         render_mode: str | None = None,
     ) -> None:
         super().__init__()
@@ -77,6 +78,7 @@ class HTPdmFjspEnv(gym.Env):
         self.config.validate()
         self.env_config = env_config or GymEnvConfig()
         self.env_config.validate()
+        self.include_action_context = include_action_context
         if render_mode not in {None, "ansi"}:
             raise ValueError("Only render_mode=None or 'ansi' is supported.")
         self.render_mode = render_mode
@@ -103,30 +105,37 @@ class HTPdmFjspEnv(gym.Env):
         technician_count = len(self.config.technicians)
         finite_low = np.finfo(np.float32).min
         finite_high = np.finfo(np.float32).max
-        self.observation_space = spaces.Dict(
-            {
-                "time": spaces.Box(0.0, finite_high, shape=(1,), dtype=np.float32),
-                "jobs": spaces.Box(
-                    finite_low, finite_high, shape=(job_count, 4), dtype=np.float32
-                ),
-                "machines": spaces.Box(
-                    0.0, finite_high, shape=(machine_count, 7), dtype=np.float32
-                ),
-                "technicians": spaces.Box(
-                    0.0,
-                    1.0,
-                    shape=(technician_count, 1 + machine_count),
-                    dtype=np.float32,
-                ),
-                "action_features": spaces.Box(
-                    finite_low,
-                    finite_high,
-                    shape=(len(self.actions), 10),
-                    dtype=np.float32,
-                ),
-                "action_mask": spaces.MultiBinary(len(self.actions)),
-            }
-        )
+        observation_spaces: dict[str, spaces.Space] = {
+            "time": spaces.Box(0.0, finite_high, shape=(1,), dtype=np.float32),
+            "jobs": spaces.Box(
+                finite_low, finite_high, shape=(job_count, 4), dtype=np.float32
+            ),
+            "machines": spaces.Box(
+                0.0, finite_high, shape=(machine_count, 7), dtype=np.float32
+            ),
+            "technicians": spaces.Box(
+                0.0,
+                1.0,
+                shape=(technician_count, 1 + machine_count),
+                dtype=np.float32,
+            ),
+            "action_features": spaces.Box(
+                finite_low,
+                finite_high,
+                shape=(len(self.actions), 10),
+                dtype=np.float32,
+            ),
+            "action_mask": spaces.MultiBinary(len(self.actions)),
+        }
+        if self.include_action_context:
+            action_context_dim = 17 + machine_count
+            observation_spaces["action_context"] = spaces.Box(
+                finite_low,
+                finite_high,
+                shape=(len(self.actions), action_context_dim),
+                dtype=np.float32,
+            )
+        self.observation_space = spaces.Dict(observation_spaces)
         self._has_reset = False
         self._done = False
 
@@ -362,7 +371,7 @@ class HTPdmFjspEnv(gym.Env):
                 )
             else:
                 action_features[index, 9] = mask[index]
-        return {
+        observation = {
             "time": np.asarray([self.now / max_due], dtype=np.float32),
             "jobs": jobs_array,
             "machines": machines_array,
@@ -370,6 +379,49 @@ class HTPdmFjspEnv(gym.Env):
             "action_features": action_features,
             "action_mask": mask,
         }
+        if self.include_action_context:
+            context = np.zeros(
+                (
+                    len(self.actions),
+                    int(self.observation_space["action_context"].shape[1]),
+                ),
+                dtype=np.float32,
+            )
+            for index, descriptor in enumerate(self.actions):
+                offset = 0
+                if descriptor.job_id is not None:
+                    job_index = self.job_indices[str(descriptor.job_id)]
+                    context[index, offset] = 1.0
+                    context[index, offset + 1 : offset + 5] = jobs_array[job_index]
+                offset += 5
+                if descriptor.machine_id is not None:
+                    machine_index = self.machine_indices[str(descriptor.machine_id)]
+                    context[index, offset] = 1.0
+                    context[index, offset + 1 : offset + 8] = machines_array[
+                        machine_index
+                    ]
+                offset += 8
+                if descriptor.technician_id is not None:
+                    technician_index = self.technician_indices[
+                        str(descriptor.technician_id)
+                    ]
+                    technician_width = technicians_array.shape[1]
+                    context[index, offset] = 1.0
+                    context[
+                        index, offset + 1 : offset + 1 + technician_width
+                    ] = technicians_array[technician_index]
+                offset += 1 + technicians_array.shape[1]
+                if descriptor.operation_index is not None:
+                    job = self.job_specs[str(descriptor.job_id)]
+                    operation_count = len(job.operations)
+                    context[index, offset] = (
+                        int(descriptor.operation_index) / operation_count
+                    )
+                    context[index, offset + 1] = (
+                        operation_count - int(descriptor.operation_index)
+                    ) / operation_count
+            observation["action_context"] = context
+        return observation
 
     def _start_production(self, descriptor: ActionDescriptor) -> None:
         job_id = str(descriptor.job_id)

@@ -16,10 +16,20 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = BenchmarkConfig.from_json(ROOT / "configs" / "minimal_benchmark.json")
 
 
-def _model() -> MaskablePPO:
+def _model(*, entity_conditioned: bool = False) -> MaskablePPO:
     return MaskablePPO(
         SharedActionMaskablePolicy,
-        Monitor(HTPdmFjspEnv(config=CONFIG)),
+        Monitor(
+            HTPdmFjspEnv(
+                config=CONFIG,
+                include_action_context=entity_conditioned,
+            )
+        ),
+        policy_kwargs={
+            "extra_action_feature_keys": (
+                ("action_context",) if entity_conditioned else ()
+            )
+        },
         n_steps=32,
         batch_size=16,
         n_epochs=1,
@@ -60,4 +70,47 @@ def test_shared_action_policy_trains_saves_and_loads(tmp_path: Path) -> None:
         observation, action_masks=mask, deterministic=True
     )
     assert mask[int(np.asarray(action).item())]
+    env.close()
+
+
+def test_entity_context_links_actions_to_their_entities() -> None:
+    env = HTPdmFjspEnv(config=CONFIG, include_action_context=True)
+    observation, _ = env.reset(seed=123)
+    context = observation["action_context"]
+    assert context.shape == env.observation_space["action_context"].shape
+    assert np.count_nonzero(context[0]) == 0
+    production_index = next(
+        index
+        for index, descriptor in enumerate(env.actions)
+        if descriptor.kind == "production"
+    )
+    descriptor = env.actions[production_index]
+    job_index = env.job_indices[str(descriptor.job_id)]
+    machine_index = env.machine_indices[str(descriptor.machine_id)]
+    assert context[production_index, 0] == 1.0
+    assert np.array_equal(
+        context[production_index, 1:5], observation["jobs"][job_index]
+    )
+    assert context[production_index, 5] == 1.0
+    assert np.array_equal(
+        context[production_index, 6:13], observation["machines"][machine_index]
+    )
+    env.close()
+
+
+def test_entity_conditioned_logits_are_permutation_equivariant() -> None:
+    env = HTPdmFjspEnv(config=CONFIG, include_action_context=True)
+    observation, _ = env.reset(seed=321)
+    model = _model(entity_conditioned=True)
+    obs_tensor, _ = model.policy.obs_to_tensor(observation)
+    with th.no_grad():
+        original = model.policy.action_logits(obs_tensor)
+        permuted_obs = {key: value.clone() for key, value in obs_tensor.items()}
+        for key in ("action_features", "action_context"):
+            permuted_obs[key][:, [1, 2]] = permuted_obs[key][:, [2, 1]]
+        permuted = model.policy.action_logits(permuted_obs)
+    assert th.allclose(original[:, 1], permuted[:, 2])
+    assert th.allclose(original[:, 2], permuted[:, 1])
+    assert th.allclose(original[:, 3:], permuted[:, 3:])
+    model.learn(total_timesteps=64)
     env.close()

@@ -29,6 +29,7 @@ class SharedActionMaskablePolicy(MaskableMultiInputActorCriticPolicy):
         global_hidden_dim: int = 128,
         action_hidden_dim: int = 64,
         scorer_hidden_dim: int = 128,
+        extra_action_feature_keys: tuple[str, ...] = (),
         **kwargs: Any,
     ) -> None:
         if not isinstance(action_space, spaces.Discrete):
@@ -39,15 +40,33 @@ class SharedActionMaskablePolicy(MaskableMultiInputActorCriticPolicy):
         if action_feature_space.shape[0] != action_space.n:
             raise ValueError("Action feature count does not match action space.")
         self.action_count = action_space.n
+        self.extra_action_feature_keys = tuple(extra_action_feature_keys)
         # The final feature is a duplicate of the separately applied action mask.
         self.action_feature_dim = action_feature_space.shape[1] - 1
+        self.extra_action_feature_dim = 0
+        for key in self.extra_action_feature_keys:
+            if key not in observation_space.spaces:
+                raise ValueError(f"Missing extra per-action observation: {key}.")
+            feature_space = observation_space.spaces[key]
+            if len(feature_space.shape) != 2:
+                raise ValueError(f"{key} must have shape (actions, features).")
+            if feature_space.shape[0] != action_space.n:
+                raise ValueError(f"{key} action count does not match action space.")
+            self.extra_action_feature_dim += feature_space.shape[1]
+        self.action_feature_dim += self.extra_action_feature_dim
         self.global_input_dim = sum(
             int(np.prod(observation_space.spaces[key].shape))
             for key in self.GLOBAL_KEYS
         )
-        self.critic_input_dim = self.global_input_dim + int(
-            np.prod(action_feature_space.shape)
-        ) + action_space.n
+        self.critic_input_dim = (
+            self.global_input_dim
+            + int(np.prod(action_feature_space.shape))
+            + sum(
+                int(np.prod(observation_space.spaces[key].shape))
+                for key in self.extra_action_feature_keys
+            )
+            + action_space.n
+        )
         self.global_hidden_dim = global_hidden_dim
         self.action_hidden_dim = action_hidden_dim
         self.scorer_hidden_dim = scorer_hidden_dim
@@ -115,16 +134,25 @@ class SharedActionMaskablePolicy(MaskableMultiInputActorCriticPolicy):
             (
                 self._global_input(obs),
                 obs["action_features"].flatten(start_dim=1),
+                *(
+                    obs[key].flatten(start_dim=1)
+                    for key in self.extra_action_feature_keys
+                ),
                 obs["action_mask"].flatten(start_dim=1),
             ),
             dim=1,
         )
 
+    def _per_action_input(self, obs: dict[str, th.Tensor]) -> th.Tensor:
+        features = [obs["action_features"][..., :-1]]
+        features.extend(obs[key] for key in self.extra_action_feature_keys)
+        return th.cat(features, dim=-1)
+
     def action_logits(self, obs: dict[str, th.Tensor]) -> th.Tensor:
         """Return one logit per action using a shared scoring network."""
 
         global_latent = self.global_encoder(self._global_input(obs))
-        action_features = obs["action_features"][..., : self.action_feature_dim]
+        action_features = self._per_action_input(obs)
         action_latent = self.action_encoder(action_features)
         expanded_global = global_latent.unsqueeze(1).expand(
             -1, self.action_count, -1

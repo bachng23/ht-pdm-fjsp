@@ -116,9 +116,10 @@ def _make_training_env(
     *,
     seed: int,
     monitor_path: Path,
+    env_kwargs: dict[str, Any] | None = None,
 ):
     def factory():
-        env = HTPdmFjspEnv(config=config)
+        env = HTPdmFjspEnv(config=config, **(env_kwargs or {}))
         env.reset(seed=seed)
         return Monitor(env, filename=str(monitor_path))
 
@@ -134,6 +135,7 @@ def train_model(
     policy: Any = "MultiInputPolicy",
     policy_kwargs: dict[str, Any] | None = None,
     ent_coef: float = 0.0,
+    env_kwargs: dict[str, Any] | None = None,
 ) -> tuple[MaskablePPO, float]:
     set_random_seed(settings.train_seed)
     monitor_dir = output_dir / "monitor"
@@ -144,6 +146,7 @@ def train_model(
                 config,
                 seed=settings.train_seed + rank,
                 monitor_path=monitor_dir / f"env_{rank}",
+                env_kwargs=env_kwargs,
             )
             for rank in range(settings.n_envs)
         ]
@@ -189,12 +192,13 @@ def evaluate_ppo(
     *,
     split: str,
     show_progress: bool,
+    env_kwargs: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for seed in tqdm(
         list(seeds), desc=f"PPO {split}", unit="episode", disable=not show_progress
     ):
-        env = HTPdmFjspEnv(config=config)
+        env = HTPdmFjspEnv(config=config, **(env_kwargs or {}))
         observation, _ = env.reset(seed=seed)
         episode_return = 0.0
         while not env._done:
