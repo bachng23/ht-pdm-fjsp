@@ -31,6 +31,7 @@ ht-pdm-fjsp-ppo-replicates = "ht_pdm_fjsp.multi_seed_experiment:main"
 ht-pdm-fjsp-ppo-select = "ht_pdm_fjsp.checkpoint_selection:main"
 ht-pdm-fjsp-ppo-diagnostics = "ht_pdm_fjsp.ppo_diagnostics:main"
 ht-pdm-fjsp-ppo-route-guard = "ht_pdm_fjsp.route_guard_experiment:main"
+ht-pdm-fjsp-shared-action-ppo = "ht_pdm_fjsp.shared_policy_experiment:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

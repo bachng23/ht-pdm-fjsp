@@ -131,6 +131,9 @@ def train_model(
     output_dir: Path,
     *,
     show_progress: bool,
+    policy: Any = "MultiInputPolicy",
+    policy_kwargs: dict[str, Any] | None = None,
+    ent_coef: float = 0.0,
 ) -> tuple[MaskablePPO, float]:
     set_random_seed(settings.train_seed)
     monitor_dir = output_dir / "monitor"
@@ -146,13 +149,15 @@ def train_model(
         ]
     )
     model = MaskablePPO(
-        "MultiInputPolicy",
+        policy,
         env,
         learning_rate=settings.learning_rate,
         n_steps=settings.n_steps,
         batch_size=settings.batch_size,
         n_epochs=settings.n_epochs,
         gamma=settings.gamma,
+        ent_coef=ent_coef,
+        policy_kwargs=policy_kwargs,
         seed=settings.train_seed,
         device=settings.device,
         verbose=0,
