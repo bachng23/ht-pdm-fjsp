@@ -11,7 +11,7 @@ import sys
 from importlib.metadata import version
 from pathlib import Path
 from statistics import fmean
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import numpy as np
 from sb3_contrib import MaskablePPO
@@ -144,6 +144,11 @@ def trace_policy(
     seeds: Iterable[int],
     *,
     train_seed: int,
+    condition: str = "original",
+    mask_transform: Callable[
+        [HTPdmFjspEnv, np.ndarray], tuple[np.ndarray, bool]
+    ]
+    | None = None,
     progress: tqdm[Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Evaluate a deterministic policy and retain decision-level diagnostics."""
@@ -162,15 +167,27 @@ def trace_policy(
         feasible_counts: list[int] = []
         preventive_opportunities = 0
         invalid_actions = 0
+        intervention_activations = 0
         last_info: dict[str, Any] | None = None
         while not env._done:
             mask = env.action_masks()
+            policy_mask = mask
+            intervention_applied = False
+            if mask_transform is not None:
+                policy_mask, intervention_applied = mask_transform(env, mask)
+                if policy_mask.shape != mask.shape:
+                    raise ValueError("A diagnostic mask transform changed mask shape.")
+                if np.any(policy_mask > mask):
+                    raise ValueError("A diagnostic mask transform enabled an action.")
+                if not policy_mask.any():
+                    raise ValueError("A diagnostic mask transform removed every action.")
+            intervention_activations += int(intervention_applied)
             feasible_by_kind = _feasible_kind_counts(env, mask)
             preventive_opportunities += int(feasible_by_kind["preventive"] > 0)
             feasible_counts.append(int(mask.sum()))
             action, _ = model.predict(
                 observation,
-                action_masks=mask,
+                action_masks=policy_mask,
                 deterministic=True,
             )
             action_index = int(np.asarray(action).item())
@@ -199,6 +216,7 @@ def trace_policy(
             decision_rows.append(
                 {
                     "split": "diagnostic",
+                    "condition": condition,
                     "train_seed": train_seed,
                     "seed": int(seed),
                     "decision_index": env.decision_count,
@@ -211,6 +229,8 @@ def trace_policy(
                     "machine_id": descriptor.machine_id or "",
                     "technician_id": descriptor.technician_id or "",
                     "feasible_actions": int(mask.sum()),
+                    "policy_feasible_actions": int(policy_mask.sum()),
+                    "intervention_applied": intervention_applied,
                     **{
                         f"feasible_{kind}": count
                         for kind, count in feasible_by_kind.items()
@@ -238,6 +258,7 @@ def trace_policy(
             {
                 "split": "diagnostic",
                 "policy": "maskable_ppo",
+                "condition": condition,
                 "train_seed": train_seed,
                 "seed": int(seed),
                 "episode_return": episode_return,
@@ -267,6 +288,7 @@ def trace_policy(
                     else 0.0
                 ),
                 "invalid_actions": invalid_actions,
+                "intervention_activations": intervention_activations,
                 **{
                     f"cumulative_reward_{name}": float(cumulative[name])
                     for name in REWARD_COMPONENTS
