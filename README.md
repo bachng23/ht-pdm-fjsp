@@ -88,3 +88,16 @@ Training and evaluation display `tqdm` progress and save the model, monitor
 files, CSV training log, episode-level results, summary, and runtime manifest.
 The complete local-to-Ubuntu workflow and `rsync` retrieval command are in
 `docs/ppo_experiment_plan.md`.
+
+For independent-training-seed replication:
+
+```bash
+uv run ht-pdm-fjsp-ppo-replicates \
+  --profile smoke \
+  --output-dir artifacts/ppo_replicates_smoke
+```
+
+The full profile trains five independent models, evaluates shared held-out
+seeds, evaluates intermediate checkpoints on validation seeds, and writes
+partial artifacts after every completed replicate. See
+`docs/ppo_multiseed_replication_plan.md`.
