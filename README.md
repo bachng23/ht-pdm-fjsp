@@ -86,6 +86,8 @@ uv run ht-pdm-fjsp-ppo \
 
 Training and evaluation display `tqdm` progress and save the model, monitor
 files, CSV training log, episode-level results, summary, and runtime manifest.
+SB3 metric tables are suppressed on the terminal and retained in
+`training_log/progress.csv`.
 The complete local-to-Ubuntu workflow and `rsync` retrieval command are in
 `docs/ppo_experiment_plan.md`.
 

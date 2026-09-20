@@ -155,9 +155,9 @@ def train_model(
         gamma=settings.gamma,
         seed=settings.train_seed,
         device=settings.device,
-        verbose=1,
+        verbose=0,
     )
-    model.set_logger(configure(str(output_dir / "training_log"), ["stdout", "csv"]))
+    model.set_logger(configure(str(output_dir / "training_log"), ["csv"]))
     checkpoint_callback = CheckpointCallback(
         save_freq=max(
             1, math.ceil(settings.total_timesteps / (5 * settings.n_envs))
@@ -393,8 +393,7 @@ def run_experiment(args: argparse.Namespace) -> Path:
     (output_dir / "run_manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    print(json.dumps(results, indent=2, sort_keys=True))
-    print(f"Artifacts: {output_dir}")
+    print(f"Completed. Artifacts: {output_dir}")
     return output_dir
 
 

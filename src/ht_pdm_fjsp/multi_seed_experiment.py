@@ -291,8 +291,7 @@ def run_replicates(args: argparse.Namespace) -> Path:
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    print(json.dumps(summary, indent=2, sort_keys=True))
-    print(f"Artifacts: {output_dir}")
+    print(f"Completed. Artifacts: {output_dir}")
     return output_dir
 
 
