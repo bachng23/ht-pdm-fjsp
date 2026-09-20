@@ -29,6 +29,7 @@ ht-pdm-fjsp-gym-benchmark = "ht_pdm_fjsp.gym_benchmark:main"
 ht-pdm-fjsp-ppo = "ht_pdm_fjsp.rl_experiment:main"
 ht-pdm-fjsp-ppo-replicates = "ht_pdm_fjsp.multi_seed_experiment:main"
 ht-pdm-fjsp-ppo-select = "ht_pdm_fjsp.checkpoint_selection:main"
+ht-pdm-fjsp-ppo-diagnostics = "ht_pdm_fjsp.ppo_diagnostics:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
