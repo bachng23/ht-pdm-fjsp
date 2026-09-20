@@ -46,3 +46,11 @@ def test_aggregate_uses_training_seed_as_replication_unit() -> None:
     assert result["ppo_per_training_seed"]["11000"]["objective"] == 13.0
     comparison = result["paired_comparisons"]["joint_risk_greedy"]
     assert comparison["objective_delta_across_training_seeds"]["mean"] == -4.0
+
+
+def test_aggregate_accepts_training_seeds_loaded_from_csv() -> None:
+    ppo_rows = [_row("maskable_ppo", 30_000, 8.0, 10_000)]
+    ppo_rows[0]["train_seed"] = "10000"
+    baseline_rows = [_row("joint_risk_greedy", 30_000, 10.0)]
+    result = aggregate_results(ppo_rows, baseline_rows)
+    assert result["ppo_per_training_seed"]["10000"]["objective"] == 8.0

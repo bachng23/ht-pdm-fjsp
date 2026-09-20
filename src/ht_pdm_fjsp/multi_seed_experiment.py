@@ -84,7 +84,9 @@ def aggregate_results(
     train_seeds = sorted({int(row["train_seed"]) for row in test_ppo})
     per_training_seed: dict[str, Any] = {}
     for train_seed in train_seeds:
-        selected = [row for row in test_ppo if row["train_seed"] == train_seed]
+        selected = [
+            row for row in test_ppo if int(row["train_seed"]) == train_seed
+        ]
         per_training_seed[str(train_seed)] = {
             metric: fmean(float(row[metric]) for row in selected)
             for metric in metrics
@@ -108,7 +110,9 @@ def aggregate_results(
         seed_level_deltas: dict[str, list[float]] = {metric: [] for metric in metrics}
         replicate_objective_means: list[float] = []
         for train_seed in train_seeds:
-            selected = [row for row in test_ppo if row["train_seed"] == train_seed]
+            selected = [
+                row for row in test_ppo if int(row["train_seed"]) == train_seed
+            ]
             objective_deltas: list[float] = []
             for row in selected:
                 baseline = baseline_lookup[(policy, int(row["seed"]))]
