@@ -34,6 +34,7 @@ ht-pdm-fjsp-ppo-route-guard = "ht_pdm_fjsp.route_guard_experiment:main"
 ht-pdm-fjsp-shared-action-ppo = "ht_pdm_fjsp.shared_policy_experiment:main"
 ht-pdm-fjsp-entity-conditioned-ppo = "ht_pdm_fjsp.entity_conditioned_experiment:main"
 ht-pdm-fjsp-preventive-shortcut = "ht_pdm_fjsp.preventive_shortcut_diagnostic:main"
+ht-pdm-fjsp-production-context-ppo = "ht_pdm_fjsp.production_context_experiment:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -67,6 +67,7 @@ class HTPdmFjspEnv(gym.Env):
         config_path: str | Path | None = None,
         env_config: GymEnvConfig | None = None,
         include_action_context: bool = False,
+        include_production_context: bool = False,
         render_mode: str | None = None,
     ) -> None:
         super().__init__()
@@ -79,6 +80,7 @@ class HTPdmFjspEnv(gym.Env):
         self.env_config = env_config or GymEnvConfig()
         self.env_config.validate()
         self.include_action_context = include_action_context
+        self.include_production_context = include_production_context
         if render_mode not in {None, "ansi"}:
             raise ValueError("Only render_mode=None or 'ansi' is supported.")
         self.render_mode = render_mode
@@ -133,6 +135,13 @@ class HTPdmFjspEnv(gym.Env):
                 finite_low,
                 finite_high,
                 shape=(len(self.actions), action_context_dim),
+                dtype=np.float32,
+            )
+        if self.include_production_context:
+            observation_spaces["production_context"] = spaces.Box(
+                finite_low,
+                finite_high,
+                shape=(len(self.actions), 6 + machine_count),
                 dtype=np.float32,
             )
         self.observation_space = spaces.Dict(observation_spaces)
@@ -421,6 +430,30 @@ class HTPdmFjspEnv(gym.Env):
                         operation_count - int(descriptor.operation_index)
                     ) / operation_count
             observation["action_context"] = context
+        if self.include_production_context:
+            production_context = np.zeros(
+                (
+                    len(self.actions),
+                    int(self.observation_space["production_context"].shape[1]),
+                ),
+                dtype=np.float32,
+            )
+            for index, descriptor in enumerate(self.actions):
+                if descriptor.kind != "production":
+                    continue
+                job_id = str(descriptor.job_id)
+                job = self.job_specs[job_id]
+                operation_index = int(descriptor.operation_index)
+                production_context[index, :4] = jobs_array[
+                    self.job_indices[job_id]
+                ]
+                production_context[index, 4] = operation_index / len(job.operations)
+                production_context[index, 5] = (
+                    len(job.operations) - operation_index
+                ) / len(job.operations)
+                machine_index = self.machine_indices[str(descriptor.machine_id)]
+                production_context[index, 6 + machine_index] = 1.0
+            observation["production_context"] = production_context
         return observation
 
     def _start_production(self, descriptor: ActionDescriptor) -> None:
