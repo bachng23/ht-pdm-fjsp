@@ -22,6 +22,9 @@
 - Smoke gate: 512 steps and five validation/test seeds on local macOS.
 - Full default: 500,000 steps, four vector environments, and 100 test seeds on
   Ubuntu. This is an engineering baseline, not a preregistered final budget.
+- `--device auto` checks whether the installed PyTorch build contains kernels
+  for the detected GPU architecture. Unsupported legacy GPUs fall back to CPU
+  with a visible warning instead of crashing after training starts.
 
 ## Ubuntu lab run
 

@@ -16,6 +16,7 @@ from time import perf_counter
 from typing import Any, Iterable
 
 import numpy as np
+import torch
 from sb3_contrib import MaskablePPO
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.callbacks import CheckpointCallback
@@ -52,6 +53,36 @@ class ExperimentSettings:
     test_seeds: tuple[int, ...]
     device: str
     include_slow_baselines: bool
+
+
+def resolve_device(requested: str) -> str:
+    """Resolve SB3 device while rejecting unsupported CUDA architectures."""
+
+    if requested == "cpu":
+        return "cpu"
+    wants_cuda = requested == "auto" or requested.startswith("cuda")
+    if not wants_cuda:
+        return requested
+    if not torch.cuda.is_available():
+        if requested.startswith("cuda"):
+            raise RuntimeError("CUDA was requested explicitly but is not available.")
+        return "cpu"
+    device_index = 0
+    if ":" in requested:
+        device_index = int(requested.split(":", maxsplit=1)[1])
+    major, minor = torch.cuda.get_device_capability(device_index)
+    required_arch = f"sm_{major}{minor}"
+    supported_arches = set(torch.cuda.get_arch_list())
+    if required_arch not in supported_arches:
+        message = (
+            f"GPU {torch.cuda.get_device_name(device_index)} requires {required_arch}, "
+            f"but this PyTorch build supports {sorted(supported_arches)}."
+        )
+        if requested.startswith("cuda"):
+            raise RuntimeError(message)
+        print(f"WARNING: {message} Falling back to CPU.", file=sys.stderr)
+        return "cpu"
+    return "cuda" if requested == "auto" else requested
 
 
 def profile_defaults(profile: str) -> dict[str, Any]:
@@ -277,6 +308,7 @@ def run_experiment(args: argparse.Namespace) -> Path:
         )
     output_dir.mkdir(parents=True, exist_ok=True)
     defaults = profile_defaults(args.profile)
+    resolved_device = resolve_device(args.device)
     settings = ExperimentSettings(
         profile=args.profile,
         total_timesteps=args.total_timesteps or defaults["total_timesteps"],
@@ -297,7 +329,7 @@ def run_experiment(args: argparse.Namespace) -> Path:
             if args.test_seeds
             else defaults["test_seeds"]
         ),
-        device=args.device,
+        device=resolved_device,
         include_slow_baselines=(
             defaults["include_slow_baselines"] and not args.skip_slow_baselines
         ),
@@ -308,6 +340,7 @@ def run_experiment(args: argparse.Namespace) -> Path:
     manifest = {
         "status": "RUNNING",
         "config_path": str(Path(args.config).resolve()),
+        "requested_device": args.device,
         "settings": asdict(settings),
         "runtime": {
             "python": sys.version,

@@ -7,6 +7,7 @@ import numpy as np
 from gymnasium.utils.env_checker import check_env
 
 import ht_pdm_fjsp
+import ht_pdm_fjsp.rl_experiment as rl_experiment
 from ht_pdm_fjsp.advanced_baselines import (
     CPSATReactivePolicy,
     HealthThresholdPolicy,
@@ -18,6 +19,7 @@ from ht_pdm_fjsp.advanced_baselines import (
 )
 from ht_pdm_fjsp.gym_env import HTPdmFjspEnv
 from ht_pdm_fjsp.models import BenchmarkConfig
+from ht_pdm_fjsp.rl_experiment import resolve_device
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +55,24 @@ def test_unseeded_resets_use_reproducible_seed_stream() -> None:
     second.reset()
     assert first.root_seed == second.root_seed
     assert first.root_seed != 0
+
+
+def test_explicit_cpu_device_is_preserved() -> None:
+    assert resolve_device("cpu") == "cpu"
+
+
+def test_auto_device_falls_back_for_unsupported_gpu(monkeypatch) -> None:
+    monkeypatch.setattr(rl_experiment.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        rl_experiment.torch.cuda, "get_device_capability", lambda index: (6, 1)
+    )
+    monkeypatch.setattr(
+        rl_experiment.torch.cuda, "get_arch_list", lambda: ["sm_75", "sm_80"]
+    )
+    monkeypatch.setattr(
+        rl_experiment.torch.cuda, "get_device_name", lambda index: "Quadro P2200"
+    )
+    assert resolve_device("auto") == "cpu"
 
 
 def test_action_mask_enforces_machine_and_job_exclusivity() -> None:
