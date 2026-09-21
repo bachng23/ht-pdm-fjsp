@@ -23,10 +23,17 @@ class MachineAgentsCTDEEnv:
     """
 
     LOCAL_FEATURE_DIM = 23
+    BROADCAST_CONTEXT_DIM = 8
 
-    def __init__(self, config: BenchmarkConfig) -> None:
+    def __init__(
+        self, config: BenchmarkConfig, *, include_broadcast_context: bool = False
+    ) -> None:
         self.config = config
         self.core = HTPdmFjspEnv(config=config)
+        self.include_broadcast_context = include_broadcast_context
+        self.local_feature_dim = self.LOCAL_FEATURE_DIM + (
+            self.BROADCAST_CONTEXT_DIM if include_broadcast_context else 0
+        )
         self.machine_ids = tuple(machine.machine_id for machine in config.machines)
         catalogs: list[tuple[int | None, ...]] = []
         for machine_id in self.machine_ids:
@@ -82,7 +89,7 @@ class MachineAgentsCTDEEnv:
         self, observation: dict[str, np.ndarray]
     ) -> dict[str, np.ndarray]:
         local = np.zeros(
-            (self.num_agents, self.max_local_actions, self.LOCAL_FEATURE_DIM),
+            (self.num_agents, self.max_local_actions, self.local_feature_dim),
             dtype=np.float32,
         )
         masks = np.zeros(
@@ -91,6 +98,7 @@ class MachineAgentsCTDEEnv:
         core_mask = observation["action_mask"].astype(bool)
         for agent_index, catalog in enumerate(self.local_action_catalogs):
             machine_features = observation["machines"][agent_index]
+            broadcast_context = self._broadcast_context(observation, agent_index)
             feasible_nonwait = any(
                 global_action is not None and core_mask[global_action]
                 for global_action in catalog
@@ -117,15 +125,16 @@ class MachineAgentsCTDEEnv:
                         technician_idle = float(
                             observation["technicians"][technician_index, 0]
                         )
-                local[agent_index, local_action] = np.concatenate(
-                    [
-                        observation["time"],
-                        machine_features,
-                        action_features,
-                        job_features,
-                        np.asarray([technician_idle], dtype=np.float32),
-                    ]
-                )
+                features = [
+                    observation["time"],
+                    machine_features,
+                    action_features,
+                    job_features,
+                    np.asarray([technician_idle], dtype=np.float32),
+                ]
+                if self.include_broadcast_context:
+                    features.append(broadcast_context)
+                local[agent_index, local_action] = np.concatenate(features)
             if not masks[agent_index].any():
                 raise AssertionError("Every machine agent needs a feasible action")
         return {
@@ -133,6 +142,40 @@ class MachineAgentsCTDEEnv:
             "action_masks": masks,
             "global_state": self._global_state(observation),
         }
+
+    def _broadcast_context(
+        self, observation: dict[str, np.ndarray], agent_index: int
+    ) -> np.ndarray:
+        """Return observable shop aggregates without exposing entity identities."""
+
+        jobs = observation["jobs"]
+        machines = observation["machines"]
+        technicians = observation["technicians"]
+        other_machine_indices = [
+            index for index in range(self.num_agents) if index != agent_index
+        ]
+        other_machines = machines[other_machine_indices]
+        if len(other_machines):
+            other_idle = float(other_machines[:, 0].mean())
+            other_mean_age = float(other_machines[:, 4].mean())
+            other_max_age = float(other_machines[:, 4].max())
+        else:
+            other_idle = 0.0
+            other_mean_age = 0.0
+            other_max_age = 0.0
+        return np.asarray(
+            [
+                jobs[:, 0].mean(),
+                jobs[:, 1].mean(),
+                jobs[:, 2].mean(),
+                jobs[:, 3].min(),
+                other_idle,
+                other_mean_age,
+                other_max_age,
+                technicians[:, 0].mean(),
+            ],
+            dtype=np.float32,
+        )
 
     def local_to_global(self, agent_index: int, local_action: int) -> int | None:
         catalog = self.local_action_catalogs[agent_index]

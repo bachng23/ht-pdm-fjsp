@@ -103,3 +103,22 @@ The full profile trains five independent models, evaluates shared held-out
 seeds, evaluates intermediate checkpoints on validation seeds, and writes
 partial artifacts after every completed replicate. See
 `docs/ppo_multiseed_replication_plan.md`.
+
+## MARL architecture diagnostic
+
+The diagnostic runner compares the completed centralized and MAPPO checkpoints
+with matched-budget PS-IPPO, independent-actor MAPPO, and broadcast-context
+MAPPO treatments. It isolates centralized-critic, parameter-sharing, and actor
+information effects while keeping the final test panel closed.
+
+```bash
+uv run ht-pdm-fjsp-marl-diagnostic \
+  --profile smoke \
+  --device cpu \
+  --centralized-source-run lab_results/shared_action_ppo_20260920T123821Z \
+  --ctde-source-run lab_results/ctde_mappo_20260921T153014Z \
+  --output-dir artifacts/marl_diagnostic_smoke
+```
+
+See `docs/marl_diagnostic_plan.md` for the locked hypotheses, metrics, seeds,
+stopping rule, artifact schema, and Ubuntu workflow.

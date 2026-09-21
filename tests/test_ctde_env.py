@@ -45,6 +45,27 @@ def test_ctde_observations_separate_local_actor_and_global_critic() -> None:
     assert observation["action_masks"].all(axis=1).sum() == 0
 
 
+def test_broadcast_context_adds_only_locked_aggregate_features() -> None:
+    base = MachineAgentsCTDEEnv(CONFIG)
+    context = MachineAgentsCTDEEnv(CONFIG, include_broadcast_context=True)
+    base_observation, _ = base.reset(seed=11)
+    context_observation, _ = context.reset(seed=11)
+    assert context.local_feature_dim == (
+        base.LOCAL_FEATURE_DIM + base.BROADCAST_CONTEXT_DIM
+    )
+    assert np.array_equal(
+        context_observation["local_observations"][..., : base.LOCAL_FEATURE_DIM],
+        base_observation["local_observations"],
+    )
+    for agent in range(context.num_agents):
+        catalog_size = len(context.local_action_catalogs[agent])
+        broadcast = context_observation["local_observations"][
+            agent, :catalog_size, base.LOCAL_FEATURE_DIM :
+        ]
+        assert np.allclose(broadcast, broadcast[0])
+        assert np.isfinite(broadcast).all()
+
+
 def test_same_operation_proposals_are_resolved_once() -> None:
     env = MachineAgentsCTDEEnv(CONFIG)
     env.reset(seed=2)

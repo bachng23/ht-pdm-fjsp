@@ -41,6 +41,7 @@ ht-pdm-fjsp-route-preserving-residual = "ht_pdm_fjsp.route_preserving_residual_e
 ht-pdm-fjsp-route-reroute-diagnostic = "ht_pdm_fjsp.route_preserving_reroute_diagnostic:main"
 ht-pdm-fjsp-conflict-aware-residual = "ht_pdm_fjsp.conflict_aware_residual_experiment:main"
 ht-pdm-fjsp-ctde-mappo = "ht_pdm_fjsp.ctde_experiment:main"
+ht-pdm-fjsp-marl-diagnostic = "ht_pdm_fjsp.marl_diagnostic_experiment:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
