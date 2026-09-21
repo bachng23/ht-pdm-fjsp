@@ -80,5 +80,10 @@ class ResidualContextMaskablePolicy(SharedActionMaskablePolicy):
             * production_indicator
         )
 
+    def base_action_logits(self, obs: dict[str, th.Tensor]) -> th.Tensor:
+        """Return the frozen shared-actor logits without any residual."""
+
+        return super().action_logits(obs)
+
     def action_logits(self, obs: dict[str, th.Tensor]) -> th.Tensor:
-        return super().action_logits(obs) + self.context_residual(obs)
+        return self.base_action_logits(obs) + self.context_residual(obs)

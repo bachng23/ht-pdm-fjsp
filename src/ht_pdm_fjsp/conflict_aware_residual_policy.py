@@ -205,9 +205,7 @@ class ConflictAwareRoutePreservingResidualPolicy(
         obs: dict[str, th.Tensor],
         action_masks: np.ndarray | th.Tensor | None = None,
     ) -> ConflictAwareRoutePreservingDistribution:
-        base_logits = super(
-            RoutePreservingResidualContextPolicy, self
-        ).action_logits(obs)
+        base_logits = self.base_action_logits(obs)
         residual_logits = self.context_residual(obs)
         production_mask = obs["action_features"][..., 1] > 0.5
         distribution = ConflictAwareRoutePreservingDistribution(

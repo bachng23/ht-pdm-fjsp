@@ -148,10 +148,21 @@ def test_policy_trains_and_roundtrips_with_static_conflict_graph(
     )
     model.policy.load_shared_base(shared.policy)
     model.learn(total_timesteps=64)
+    observation, _ = context_env.reset(seed=48_000)
+    context_tensor, _ = model.policy.obs_to_tensor(observation)
+    shared_observation = {
+        key: observation[key] for key in shared.observation_space.spaces
+    }
+    shared_tensor, _ = shared.policy.obs_to_tensor(shared_observation)
+    with th.no_grad():
+        assert th.equal(
+            model.policy.base_action_logits(context_tensor),
+            shared.policy.action_logits(shared_tensor),
+        )
+
     path = tmp_path / "conflict_policy"
     model.save(path)
     loaded = MaskablePPO.load(path, device="cpu")
-    observation, _ = context_env.reset(seed=48_000)
     mask = context_env.action_masks()
     action, _ = loaded.predict(observation, action_masks=mask, deterministic=True)
     assert mask[int(np.asarray(action).item())]
