@@ -38,6 +38,7 @@ ht-pdm-fjsp-production-context-ppo = "ht_pdm_fjsp.production_context_experiment:
 ht-pdm-fjsp-production-context-diagnostic = "ht_pdm_fjsp.production_context_diagnostic:main"
 ht-pdm-fjsp-residual-context-ppo = "ht_pdm_fjsp.residual_context_experiment:main"
 ht-pdm-fjsp-route-preserving-residual = "ht_pdm_fjsp.route_preserving_residual_experiment:main"
+ht-pdm-fjsp-route-reroute-diagnostic = "ht_pdm_fjsp.route_preserving_reroute_diagnostic:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
