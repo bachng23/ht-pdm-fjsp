@@ -13,7 +13,7 @@ from importlib.metadata import version
 from pathlib import Path
 from statistics import fmean, pstdev
 from time import perf_counter
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import numpy as np
 import torch
@@ -136,6 +136,7 @@ def train_model(
     policy_kwargs: dict[str, Any] | None = None,
     ent_coef: float = 0.0,
     env_kwargs: dict[str, Any] | None = None,
+    model_initializer: Callable[[MaskablePPO], None] | None = None,
 ) -> tuple[MaskablePPO, float]:
     set_random_seed(settings.train_seed)
     monitor_dir = output_dir / "monitor"
@@ -165,6 +166,8 @@ def train_model(
         device=settings.device,
         verbose=0,
     )
+    if model_initializer is not None:
+        model_initializer(model)
     model.set_logger(configure(str(output_dir / "training_log"), ["csv"]))
     checkpoint_callback = CheckpointCallback(
         save_freq=max(
