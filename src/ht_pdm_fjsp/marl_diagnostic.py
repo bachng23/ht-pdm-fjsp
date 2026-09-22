@@ -246,6 +246,7 @@ def train_diagnostic_policy(
     critic_mode: str,
     include_broadcast_context: bool,
     show_progress: bool,
+    wait_policy: str = "legacy",
 ) -> tuple[DiagnosticPolicy, float]:
     """Train one matched-budget PPO MARL diagnostic cell."""
 
@@ -256,7 +257,9 @@ def train_diagnostic_policy(
     rng = np.random.default_rng(train_seed)
     envs = [
         MachineAgentsCTDEEnv(
-            config, include_broadcast_context=include_broadcast_context
+            config,
+            include_broadcast_context=include_broadcast_context,
+            wait_policy=wait_policy,
         )
         for _ in range(settings.n_envs)
     ]
@@ -521,6 +524,7 @@ def evaluate_diagnostic_policy(
     condition: str,
     device: str,
     show_progress: bool,
+    wait_policy: str = "legacy",
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     rows: list[dict[str, Any]] = []
     audit: dict[str, int] = {}
@@ -533,6 +537,7 @@ def evaluate_diagnostic_policy(
         env = MachineAgentsCTDEEnv(
             config,
             include_broadcast_context=model.include_broadcast_context,
+            wait_policy=wait_policy,
         )
         observation, _ = env.reset(seed=seed)
         episode_return = 0.0

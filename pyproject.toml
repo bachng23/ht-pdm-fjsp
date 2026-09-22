@@ -50,6 +50,7 @@ ht-pdm-fjsp-technician-conflicts = "ht_pdm_fjsp.technician_conflict_experiment:m
 ht-pdm-fjsp-technician-noop = "ht_pdm_fjsp.technician_noop_experiment:main"
 ht-pdm-fjsp-shadow-demand = "ht_pdm_fjsp.shadow_technician_demand:main"
 ht-pdm-fjsp-technician-capacity = "ht_pdm_fjsp.technician_capacity_screening:main"
+ht-pdm-fjsp-three-way-marl = "ht_pdm_fjsp.three_way_marl_experiment:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
