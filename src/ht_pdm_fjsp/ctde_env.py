@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
 import numpy as np
 
@@ -26,11 +26,18 @@ class MachineAgentsCTDEEnv:
     BROADCAST_CONTEXT_DIM = 8
 
     def __init__(
-        self, config: BenchmarkConfig, *, include_broadcast_context: bool = False
+        self,
+        config: BenchmarkConfig,
+        *,
+        include_broadcast_context: bool = False,
+        wait_policy: Literal["legacy", "safe_noop"] = "legacy",
     ) -> None:
+        if wait_policy not in {"legacy", "safe_noop"}:
+            raise ValueError(f"Unknown wait policy: {wait_policy}")
         self.config = config
         self.core = HTPdmFjspEnv(config=config)
         self.include_broadcast_context = include_broadcast_context
+        self.wait_policy = wait_policy
         self.local_feature_dim = self.LOCAL_FEATURE_DIM + (
             self.BROADCAST_CONTEXT_DIM if include_broadcast_context else 0
         )
@@ -96,6 +103,7 @@ class MachineAgentsCTDEEnv:
             (self.num_agents, self.max_local_actions), dtype=np.bool_
         )
         core_mask = observation["action_mask"].astype(bool)
+        required_nonwait_agent = self._required_nonwait_agent(core_mask)
         for agent_index, catalog in enumerate(self.local_action_catalogs):
             machine_features = observation["machines"][agent_index]
             broadcast_context = self._broadcast_context(observation, agent_index)
@@ -103,7 +111,10 @@ class MachineAgentsCTDEEnv:
                 global_action is not None and core_mask[global_action]
                 for global_action in catalog
             )
-            wait_allowed = bool(self.core.events) or not feasible_nonwait
+            if self.wait_policy == "safe_noop":
+                wait_allowed = agent_index != required_nonwait_agent
+            else:
+                wait_allowed = bool(self.core.events) or not feasible_nonwait
             for local_action, global_action in enumerate(catalog):
                 action_features = np.zeros(10, dtype=np.float32)
                 job_features = np.zeros(4, dtype=np.float32)
@@ -142,6 +153,33 @@ class MachineAgentsCTDEEnv:
             "action_masks": masks,
             "global_state": self._global_state(observation),
         }
+
+    def _required_nonwait_agent(self, core_mask: np.ndarray) -> int | None:
+        """Choose one progress anchor when safe no-op masks are enabled.
+
+        If no simulator event can advance time, exactly one agent with a feasible
+        non-wait action must act.  Production or corrective work is preferred so
+        idle peers are not forced into optional preventive maintenance.  The
+        rotating resolver priority keeps the anchor selection fair across agents.
+        """
+
+        if self.wait_policy != "safe_noop" or self.core.events:
+            return None
+        start = self.coordination_totals.get("joint_steps", 0) % self.num_agents
+        ordered_agents = tuple(
+            (start + offset) % self.num_agents for offset in range(self.num_agents)
+        )
+        for preferred_kinds in (
+            {"production", "corrective"},
+            {"production", "corrective", "preventive"},
+        ):
+            for agent_index in ordered_agents:
+                for global_action in self.local_action_catalogs[agent_index]:
+                    if global_action is None or not core_mask[global_action]:
+                        continue
+                    if self.core.actions[global_action].kind in preferred_kinds:
+                        return agent_index
+        return None
 
     def _broadcast_context(
         self, observation: dict[str, np.ndarray], agent_index: int

@@ -102,6 +102,34 @@ def test_masked_local_action_is_rejected_before_simulator_execution() -> None:
         env.step([masked, valid])
 
 
+def test_safe_noop_requires_exactly_one_progress_anchor_without_events() -> None:
+    env = MachineAgentsCTDEEnv(CONFIG, wait_policy="safe_noop")
+    observation, _ = env.reset(seed=4)
+    wait_mask = observation["action_masks"][:, 0]
+    assert np.count_nonzero(~wait_mask) == 1
+    required_agent = int(np.flatnonzero(~wait_mask)[0])
+    required_nonwait = np.flatnonzero(
+        observation["action_masks"][required_agent, 1:]
+    )
+    assert len(required_nonwait) > 0
+
+
+def test_safe_noop_allows_idle_peer_to_wait_while_anchor_progresses() -> None:
+    env = MachineAgentsCTDEEnv(CONFIG, wait_policy="safe_noop")
+    observation, _ = env.reset(seed=8)
+    required_agent = int(np.flatnonzero(~observation["action_masks"][:, 0])[0])
+    peer = 1 - required_agent
+    assert observation["action_masks"][peer, 0]
+    nonwait = int(
+        np.flatnonzero(observation["action_masks"][required_agent, 1:])[0] + 1
+    )
+    actions = [0, 0]
+    actions[required_agent] = nonwait
+    _, _, _, _, info = env.step(actions)
+    assert info["coordination"]["accepted"] == 1
+    assert info["coordination"]["waits"] == 1
+
+
 def test_decentralized_greedy_rollout_completes_with_reward_identity() -> None:
     env = MachineAgentsCTDEEnv(CONFIG)
     observation, _ = env.reset(seed=5)
