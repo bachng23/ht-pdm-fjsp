@@ -48,6 +48,7 @@ ht-pdm-fjsp-marl-replication = "ht_pdm_fjsp.marl_replication_experiment:main"
 ht-pdm-fjsp-marl-risk-guard = "ht_pdm_fjsp.marl_risk_guard_experiment:main"
 ht-pdm-fjsp-technician-conflicts = "ht_pdm_fjsp.technician_conflict_experiment:main"
 ht-pdm-fjsp-technician-noop = "ht_pdm_fjsp.technician_noop_experiment:main"
+ht-pdm-fjsp-shadow-demand = "ht_pdm_fjsp.shadow_technician_demand:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
