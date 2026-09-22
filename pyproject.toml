@@ -15,6 +15,7 @@ dependencies = [
     "rich>=13.9,<15",
     "sb3-contrib>=2.6,<3",
     "stable-baselines3>=2.6,<3",
+    "torch==2.14.0",
     "tqdm>=4.67,<5",
 ]
 
@@ -53,3 +54,13 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra"
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu126", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
