@@ -183,6 +183,14 @@ class MachineAgentsCTDEEnv:
             raise ValueError("Local action is outside the agent catalog")
         return catalog[local_action]
 
+    def technician_duration(self, descriptor: Any) -> float:
+        """Return service duration for a maintenance action descriptor."""
+
+        if descriptor.kind not in {"preventive", "corrective"}:
+            raise ValueError("Technician duration requires a maintenance action")
+        technician = self.core.technician_specs[str(descriptor.technician_id)]
+        return technician.duration(str(descriptor.machine_id), descriptor.kind)
+
     def step(
         self, local_actions: Sequence[int]
     ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
