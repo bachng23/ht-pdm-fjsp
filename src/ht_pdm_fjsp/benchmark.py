@@ -10,6 +10,8 @@ from pathlib import Path
 from statistics import fmean, pstdev
 from typing import Iterable
 
+from tqdm.auto import tqdm
+
 from ht_pdm_fjsp.models import BenchmarkConfig
 from ht_pdm_fjsp.policies import HealthThresholdSPTPolicy, ProductionFirstSPTPolicy
 from ht_pdm_fjsp.simulator import SimulationResult, Simulator
@@ -36,10 +38,14 @@ def run_panel(config: BenchmarkConfig, seeds: Iterable[int]) -> list[SimulationR
         ProductionFirstSPTPolicy(),
         HealthThresholdSPTPolicy(config.preventive_probability_threshold),
     )
+    tasks = [(seed, policy) for seed in seeds for policy in policies]
     return [
         simulator.run(policy, seed=seed)
-        for seed in seeds
-        for policy in policies
+        for seed, policy in tqdm(
+            tasks,
+            desc="Benchmark evaluation",
+            unit="episode",
+        )
     ]
 
 
