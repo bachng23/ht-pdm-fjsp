@@ -42,6 +42,7 @@ ht-pdm-fjsp-route-reroute-diagnostic = "ht_pdm_fjsp.route_preserving_reroute_dia
 ht-pdm-fjsp-conflict-aware-residual = "ht_pdm_fjsp.conflict_aware_residual_experiment:main"
 ht-pdm-fjsp-ctde-mappo = "ht_pdm_fjsp.ctde_experiment:main"
 ht-pdm-fjsp-marl-diagnostic = "ht_pdm_fjsp.marl_diagnostic_experiment:main"
+ht-pdm-fjsp-marl-factorial = "ht_pdm_fjsp.marl_factorial_experiment:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

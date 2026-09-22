@@ -122,3 +122,20 @@ uv run ht-pdm-fjsp-marl-diagnostic \
 
 See `docs/marl_diagnostic_plan.md` for the locked hypotheses, metrics, seeds,
 stopping rule, artifact schema, and Ubuntu workflow.
+
+The factorial follow-up completes the actor-sharing by broadcast-context design
+and adds a parameter-count-matched shared actor. Run it after the diagnostic
+artifacts are available:
+
+```bash
+uv run ht-pdm-fjsp-marl-factorial \
+  --profile smoke \
+  --device cpu \
+  --centralized-source-run lab_results/shared_action_ppo_20260920T123821Z \
+  --ctde-source-run lab_results/ctde_mappo_20260921T153014Z \
+  --diagnostic-source-run lab_results/marl_diagnostic_20260921T165536Z \
+  --output-dir artifacts/marl_factorial_smoke
+```
+
+See `docs/marl_factorial_followup_plan.md` for the locked factorial and capacity
+contrasts.
