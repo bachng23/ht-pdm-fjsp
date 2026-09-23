@@ -56,6 +56,7 @@ ht-pdm-fjsp-qmix-fidelity = "ht_pdm_fjsp.qmix_fidelity_experiment:main"
 ht-pdm-fjsp-resource-graph = "ht_pdm_fjsp.resource_conflict_graph_experiment:main"
 ht-pdm-fjsp-environment-attribution = "ht_pdm_fjsp.environment_attribution_experiment:main"
 ht-pdm-fjsp-qplex-soft-graph = "ht_pdm_fjsp.qplex_soft_graph_experiment:main"
+ht-pdm-fjsp-technician-factorial = "ht_pdm_fjsp.technician_conflict_factorial:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
