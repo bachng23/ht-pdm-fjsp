@@ -52,7 +52,9 @@ def _read_csv(path: Path) -> list[dict[str, Any]]:
 
 
 def _settings_without_device(values: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in values.items() if key != "device"}
+    normalized = {key: value for key, value in values.items() if key != "device"}
+    normalized.setdefault("n_envs", 1)
+    return normalized
 
 
 def _load_resume_state(

@@ -42,6 +42,31 @@ def test_iql_and_qmix_respect_action_masks() -> None:
         )
 
 
+def test_iql_and_qmix_batch_action_inference_respects_masks() -> None:
+    envs = [MachineAgentsCTDEEnv(_config(), wait_policy="safe_noop") for _ in range(4)]
+    observations = [env.reset(seed=index)[0] for index, env in enumerate(envs)]
+    batched = {
+        key: np.stack([observation[key] for observation in observations])
+        for key in observations[0]
+    }
+    for algorithm in ("iql", "qmix"):
+        policy = ValueDecompositionPolicy(
+            algorithm=algorithm,
+            agent_count=envs[0].num_agents,
+            local_feature_dim=envs[0].local_feature_dim,
+            global_state_dim=envs[0].global_state_dim,
+        )
+        actions = policy.act(batched, deterministic=True, device="cpu")
+        assert actions.shape == (4, envs[0].num_agents)
+        assert all(
+            batched["action_masks"][rank, agent, action]
+            for rank, row in enumerate(actions)
+            for agent, action in enumerate(row)
+        )
+    for env in envs:
+        env.close()
+
+
 def test_qmix_mixer_is_monotonic_in_agent_values() -> None:
     th.manual_seed(1)
     mixer = QMixer(agent_count=3, state_dim=5, hidden_dim=8)
@@ -68,6 +93,7 @@ def test_tiny_value_training_saves_loadable_models(tmp_path: Path) -> None:
         hidden_dim=16,
         mixer_hidden_dim=8,
         device="cpu",
+        n_envs=4,
     )
     for algorithm in ("iql", "qmix"):
         output = tmp_path / algorithm

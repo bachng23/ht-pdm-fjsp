@@ -37,6 +37,7 @@ class ValueLearningSettings:
     hidden_dim: int
     mixer_hidden_dim: int
     device: str
+    n_envs: int = 1
 
 
 def _mlp(input_dim: int, hidden_dim: int) -> nn.Sequential:
@@ -127,22 +128,30 @@ class ValueDecompositionPolicy(nn.Module):
     ) -> np.ndarray:
         local = th.as_tensor(
             observation["local_observations"], dtype=th.float32, device=device
-        ).unsqueeze(0)
+        )
         masks = th.as_tensor(
             observation["action_masks"], dtype=th.bool, device=device
         )
+        single = local.ndim == 3
+        if single:
+            local = local.unsqueeze(0)
+            masks = masks.unsqueeze(0)
         with th.no_grad():
-            values = self.q_values(local).squeeze(0)
+            values = self.q_values(local)
             greedy = values.masked_fill(~masks, -1e9).argmax(dim=-1).cpu().numpy()
         if deterministic or epsilon <= 0:
-            return greedy
+            return greedy.squeeze(0) if single else greedy
         generator = rng or np.random.default_rng()
         actions = greedy.copy()
-        for agent in range(self.agent_count):
-            if generator.random() < epsilon:
-                valid = np.flatnonzero(observation["action_masks"][agent])
-                actions[agent] = int(generator.choice(valid))
-        return actions
+        mask_array = np.asarray(observation["action_masks"])
+        if single:
+            mask_array = mask_array[None, ...]
+        for env_index in range(actions.shape[0]):
+            for agent in range(self.agent_count):
+                if generator.random() < epsilon:
+                    valid = np.flatnonzero(mask_array[env_index, agent])
+                    actions[env_index, agent] = int(generator.choice(valid))
+        return actions.squeeze(0) if single else actions
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -243,6 +252,15 @@ def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
         writer.writerows(rows)
 
 
+def _stack_observations(
+    observations: list[dict[str, np.ndarray]],
+) -> dict[str, np.ndarray]:
+    return {
+        key: np.stack([observation[key] for observation in observations])
+        for key in observations[0]
+    }
+
+
 def train_value_policy(
     config: BenchmarkConfig,
     settings: ValueLearningSettings,
@@ -252,11 +270,21 @@ def train_value_policy(
     train_seed: int,
     show_progress: bool,
 ) -> tuple[ValueDecompositionPolicy, float]:
+    if settings.n_envs < 1:
+        raise ValueError("n_envs must be positive")
+    if settings.total_timesteps % settings.n_envs:
+        raise ValueError("total_timesteps must be divisible by n_envs")
     np.random.seed(train_seed)
     th.manual_seed(train_seed)
     rng = np.random.default_rng(train_seed)
-    env = MachineAgentsCTDEEnv(config, wait_policy="safe_noop")
-    observation, _ = env.reset(seed=train_seed)
+    envs = [
+        MachineAgentsCTDEEnv(config, wait_policy="safe_noop")
+        for _ in range(settings.n_envs)
+    ]
+    observations = [
+        env.reset(seed=train_seed + rank)[0] for rank, env in enumerate(envs)
+    ]
+    env = envs[0]
     model = ValueDecompositionPolicy(
         algorithm=algorithm,
         agent_count=env.num_agents,
@@ -267,60 +295,85 @@ def train_value_policy(
     ).to(settings.device)
     target = copy.deepcopy(model).to(settings.device).eval()
     optimizer = th.optim.Adam(model.parameters(), lr=settings.learning_rate)
-    buffer = ReplayBuffer(settings.replay_capacity, observation)
+    buffer = ReplayBuffer(settings.replay_capacity, observations[0])
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoints = output_dir / "checkpoints"
     checkpoints.mkdir(exist_ok=True)
     targets = [math.ceil(settings.total_timesteps * part / 5) for part in range(1, 6)]
     next_checkpoint = 0
-    episode = 0
-    episode_return = 0.0
-    episode_length = 0
+    episode_counts = [0] * settings.n_envs
+    episode_returns = [0.0] * settings.n_envs
+    episode_lengths = [0] * settings.n_envs
     episode_rows: list[dict[str, Any]] = []
     update_rows: list[dict[str, Any]] = []
     started = perf_counter()
     progress = tqdm(
-        range(1, settings.total_timesteps + 1),
+        total=settings.total_timesteps,
         desc=f"{algorithm.upper()} seed {train_seed}",
         unit="joint-step",
         disable=not show_progress,
     )
-    for step in progress:
-        fraction = min(1.0, step / max(1, settings.epsilon_fraction * settings.total_timesteps))
+    completed_steps = 0
+    next_update = max(
+        settings.train_frequency,
+        math.ceil(settings.learning_starts / settings.train_frequency)
+        * settings.train_frequency,
+    )
+    next_target_update = settings.target_update_interval
+    next_log = 1_000
+    pending_losses: list[float] = []
+    while completed_steps < settings.total_timesteps:
+        fraction = min(
+            1.0,
+            completed_steps
+            / max(1, settings.epsilon_fraction * settings.total_timesteps),
+        )
         epsilon = settings.epsilon_start + fraction * (
             settings.epsilon_end - settings.epsilon_start
         )
+        batched_observation = _stack_observations(observations)
         actions = model.act(
-            observation,
+            batched_observation,
             deterministic=False,
             device=settings.device,
             epsilon=epsilon,
             rng=rng,
         )
-        next_observation, reward, terminated, truncated, _ = env.step(actions)
-        done = terminated or truncated
-        buffer.add(observation, actions, reward, next_observation, done)
-        episode_return += reward
-        episode_length += 1
-        observation = next_observation
-        if done:
-            episode_rows.append(
-                {
-                    "train_seed": train_seed,
-                    "episode": episode,
-                    "episode_return": episode_return,
-                    "joint_steps": episode_length,
-                }
+        for rank, current_env in enumerate(envs):
+            next_observation, reward, terminated, truncated, _ = current_env.step(
+                actions[rank]
             )
-            episode += 1
-            episode_return = 0.0
-            episode_length = 0
-            observation, _ = env.reset(seed=train_seed + episode)
+            done = terminated or truncated
+            buffer.add(
+                observations[rank], actions[rank], reward, next_observation, done
+            )
+            episode_returns[rank] += reward
+            episode_lengths[rank] += 1
+            observations[rank] = next_observation
+            if done:
+                episode_rows.append(
+                    {
+                        "train_seed": train_seed,
+                        "environment_rank": rank,
+                        "episode": episode_counts[rank],
+                        "episode_return": episode_returns[rank],
+                        "joint_steps": episode_lengths[rank],
+                    }
+                )
+                episode_counts[rank] += 1
+                episode_returns[rank] = 0.0
+                episode_lengths[rank] = 0
+                reset_seed = (
+                    train_seed
+                    + rank
+                    + episode_counts[rank] * settings.n_envs
+                )
+                observations[rank], _ = current_env.reset(seed=reset_seed)
+        completed_steps += settings.n_envs
+        progress.update(settings.n_envs)
 
-        losses: list[float] = []
-        if (
-            step >= settings.learning_starts
-            and step % settings.train_frequency == 0
+        while (
+            next_update <= completed_steps
             and buffer.size >= settings.batch_size
         ):
             for _ in range(settings.gradient_steps):
@@ -349,24 +402,38 @@ def train_value_policy(
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), 10.0)
                 optimizer.step()
-                losses.append(float(loss.item()))
-        if step % settings.target_update_interval == 0:
+                pending_losses.append(float(loss.item()))
+            next_update += settings.train_frequency
+        while next_update <= completed_steps:
+            next_update += settings.train_frequency
+        while completed_steps >= next_target_update:
             target.load_state_dict(model.state_dict())
-        if losses and (step % 1_000 == 0 or step == settings.total_timesteps):
+            next_target_update += settings.target_update_interval
+        if pending_losses and (
+            completed_steps >= next_log
+            or completed_steps == settings.total_timesteps
+        ):
             update_rows.append(
                 {
-                    "step": step,
-                    "loss": float(np.mean(losses)),
+                    "step": completed_steps,
+                    "loss": float(np.mean(pending_losses)),
                     "epsilon": epsilon,
                     "replay_size": buffer.size,
-                    "completed_episodes": episode,
+                    "completed_episodes": sum(episode_counts),
                 }
             )
+            pending_losses.clear()
+            while next_log <= completed_steps:
+                next_log += 1_000
             _write_csv(update_rows, output_dir / "training_progress.csv")
             _write_csv(episode_rows, output_dir / "training_episodes.csv")
-        while next_checkpoint < len(targets) and step >= targets[next_checkpoint]:
+        while (
+            next_checkpoint < len(targets)
+            and completed_steps >= targets[next_checkpoint]
+        ):
             model.save(checkpoints / f"model_{targets[next_checkpoint]}_steps.pt")
             next_checkpoint += 1
+    progress.close()
     elapsed = perf_counter() - started
     model.save(output_dir / "model.pt")
     (output_dir / "settings.json").write_text(
@@ -374,5 +441,6 @@ def train_value_policy(
     )
     _write_csv(episode_rows, output_dir / "training_episodes.csv")
     _write_csv(update_rows, output_dir / "training_progress.csv")
-    env.close()
+    for current_env in envs:
+        current_env.close()
     return model, elapsed
