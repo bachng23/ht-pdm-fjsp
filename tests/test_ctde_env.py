@@ -77,6 +77,7 @@ def test_same_operation_proposals_are_resolved_once() -> None:
     assert info["coordination"]["production_conflicts"] == 1
     assert info["coordination"]["accepted"] == 1
     assert info["coordination"]["invalid_executions"] == 0
+    assert sorted(info["agent_outcomes"]) == [-1, 1]
 
 
 def test_distinct_job_proposals_start_as_one_joint_decision() -> None:

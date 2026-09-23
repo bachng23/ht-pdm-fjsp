@@ -57,6 +57,7 @@ class MachineAgentsCTDEEnv:
         self._done = False
         self.coordination_totals: dict[str, int] = {}
         self.last_resolution: dict[str, int] = {}
+        self.last_agent_outcomes: tuple[int, ...] = ()
 
     @property
     def num_agents(self) -> int:
@@ -78,6 +79,7 @@ class MachineAgentsCTDEEnv:
             "duplicate_technician_executions": 0,
         }
         self.last_resolution = {}
+        self.last_agent_outcomes = ()
         return self._ctde_observation(observation), self._info()
 
     def _global_state(self, observation: dict[str, np.ndarray]) -> np.ndarray:
@@ -319,7 +321,7 @@ class MachineAgentsCTDEEnv:
             reward += float(value)
 
         self._done = terminated or truncated
-        resolution = {
+        resolution_totals = {
             "joint_steps": 1,
             "proposals": len(proposed),
             "accepted": len(accepted),
@@ -331,15 +333,29 @@ class MachineAgentsCTDEEnv:
             "duplicate_operation_executions": duplicate_operations,
             "duplicate_technician_executions": duplicate_technicians,
         }
-        self.last_resolution = resolution
-        for key, value in resolution.items():
+        for key, value in resolution_totals.items():
             self.coordination_totals[key] += value
+        accepted_agents = {agent_index for agent_index, _ in accepted}
+        proposed_agents = {agent_index for agent_index, _ in proposed}
+        agent_outcomes = tuple(
+            1
+            if agent_index in accepted_agents
+            else -1
+            if agent_index in proposed_agents
+            else 0
+            for agent_index in range(self.num_agents)
+        )
+        self.last_resolution = resolution_totals
+        # Per-agent feedback is diagnostic policy input. It does not alter
+        # simulator reward, feasibility, resolver priority, or execution.
+        self.last_agent_outcomes = agent_outcomes
         observation = self._ctde_observation(self.core._observation())
         return observation, reward, terminated, truncated, self._info()
 
     def _info(self) -> dict[str, Any]:
         return {
             "coordination": dict(self.last_resolution),
+            "agent_outcomes": self.last_agent_outcomes,
             "coordination_totals": dict(self.coordination_totals),
             "metrics": self.core.metrics(),
         }

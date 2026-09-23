@@ -204,6 +204,8 @@ def evaluate_episode(
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     env = MachineAgentsCTDEEnv(config, wait_policy="safe_noop")
     observation, _ = env.reset(seed=seed)
+    if hasattr(policy, "reset_hidden"):
+        policy.reset_hidden(batch_size=1, device=device)
     rows: list[dict[str, Any]] = []
     totals = {
         "three_way_steps": 0,
@@ -214,6 +216,8 @@ def evaluate_episode(
     }
     episode_return = 0.0
     joint_step = 0
+    rejection_streaks = np.zeros(env.num_agents, dtype=np.int64)
+    maximum_rejection_streak = 0
     while not env._done:
         actions = _actions(policy, observation, device)
         before_time = env.core.now
@@ -222,6 +226,13 @@ def evaluate_episode(
         blocked = precedence_blocked_operations(env)
         observation, reward, _, _, info = env.step(actions)
         resolution = info["coordination"]
+        outcomes = np.asarray(info["agent_outcomes"], dtype=np.int64)
+        rejection_streaks = np.where(outcomes == -1, rejection_streaks + 1, 0)
+        maximum_rejection_streak = max(
+            maximum_rejection_streak, int(rejection_streaks.max())
+        )
+        if hasattr(policy, "observe_outcome"):
+            policy.observe_outcome(actions, info["agent_outcomes"])
         three_way = int(
             resolution["production_conflicts"] > 0
             and resolution["technician_conflicts"] > 0
@@ -247,6 +258,10 @@ def evaluate_episode(
                 "elapsed_time": elapsed,
                 "production_conflicts": resolution["production_conflicts"],
                 "technician_conflicts": resolution["technician_conflicts"],
+                "proposals": resolution["proposals"],
+                "accepted": resolution["accepted"],
+                "rejected": resolution["rejected"],
+                "waits": resolution["waits"],
                 "precedence_blocked_operations": blocked,
                 "three_way": three_way,
                 "maintenance_wait_delta": wait_delta,
@@ -266,6 +281,7 @@ def evaluate_episode(
         "episode_return": episode_return,
         **result.metrics,
         **totals,
+        "maximum_rejection_streak": maximum_rejection_streak,
         "episode_has_three_way": int(totals["three_way_steps"] > 0),
     }
     coordination = {
@@ -274,6 +290,7 @@ def evaluate_episode(
         "seed": seed,
         **env.coordination_totals,
         **totals,
+        "maximum_rejection_streak": maximum_rejection_streak,
     }
     env.close()
     return episode, rows, coordination

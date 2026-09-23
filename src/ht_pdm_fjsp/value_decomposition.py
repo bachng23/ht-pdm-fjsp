@@ -269,6 +269,7 @@ def train_value_policy(
     algorithm: str,
     train_seed: int,
     show_progress: bool,
+    checkpoint_targets: tuple[int, ...] | None = None,
 ) -> tuple[ValueDecompositionPolicy, float]:
     if settings.n_envs < 1:
         raise ValueError("n_envs must be positive")
@@ -299,7 +300,15 @@ def train_value_policy(
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoints = output_dir / "checkpoints"
     checkpoints.mkdir(exist_ok=True)
-    targets = [math.ceil(settings.total_timesteps * part / 5) for part in range(1, 6)]
+    targets = list(
+        checkpoint_targets
+        or tuple(
+            math.ceil(settings.total_timesteps * part / 5)
+            for part in range(1, 6)
+        )
+    )
+    if not targets or targets != sorted(set(targets)) or targets[-1] > settings.total_timesteps:
+        raise ValueError("Checkpoint targets must be unique, ordered and within budget")
     next_checkpoint = 0
     episode_counts = [0] * settings.n_envs
     episode_returns = [0.0] * settings.n_envs
@@ -321,7 +330,16 @@ def train_value_policy(
     )
     next_target_update = settings.target_update_interval
     next_log = 1_000
-    pending_losses: list[float] = []
+    pending: dict[str, list[float]] = {
+        key: []
+        for key in (
+            "loss",
+            "chosen_q_mean",
+            "chosen_q_max",
+            "predicted_value_mean",
+            "gradient_norm",
+        )
+    }
     while completed_steps < settings.total_timesteps:
         fraction = min(
             1.0,
@@ -400,29 +418,34 @@ def train_value_policy(
                 loss = nn.functional.smooth_l1_loss(predicted, target_value)
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+                gradient_norm = nn.utils.clip_grad_norm_(model.parameters(), 10.0)
                 optimizer.step()
-                pending_losses.append(float(loss.item()))
+                pending["loss"].append(float(loss.item()))
+                pending["chosen_q_mean"].append(float(chosen.mean().item()))
+                pending["chosen_q_max"].append(float(chosen.max().item()))
+                pending["predicted_value_mean"].append(float(predicted.mean().item()))
+                pending["gradient_norm"].append(float(gradient_norm))
             next_update += settings.train_frequency
         while next_update <= completed_steps:
             next_update += settings.train_frequency
         while completed_steps >= next_target_update:
             target.load_state_dict(model.state_dict())
             next_target_update += settings.target_update_interval
-        if pending_losses and (
+        if pending["loss"] and (
             completed_steps >= next_log
             or completed_steps == settings.total_timesteps
         ):
             update_rows.append(
                 {
                     "step": completed_steps,
-                    "loss": float(np.mean(pending_losses)),
+                    **{key: float(np.mean(values)) for key, values in pending.items()},
                     "epsilon": epsilon,
                     "replay_size": buffer.size,
                     "completed_episodes": sum(episode_counts),
                 }
             )
-            pending_losses.clear()
+            for values in pending.values():
+                values.clear()
             while next_log <= completed_steps:
                 next_log += 1_000
             _write_csv(update_rows, output_dir / "training_progress.csv")
