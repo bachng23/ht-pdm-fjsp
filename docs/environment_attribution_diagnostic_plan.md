@@ -1,0 +1,105 @@
+# Environment-attribution graph diagnostic
+
+## Material Passport
+
+- Artifact: executable code-experiment plan
+- Environment: Brandimarte MK01-derived `two_specialists_x2_0`
+- Source models: completed IQL/QMIX budget-screen checkpoints
+- Primary condition: QMIX at 300,000 joint environment steps
+- Status: protocol locked before attribution results
+
+## Research question and hypotheses
+
+The preceding resource-graph diagnostic rejected hard dynamic subteams when an
+edge represented overlap among any feasible production or maintenance action.
+This follow-up asks whether that result is attributable to broad environment
+feasibility—especially maintenance actions that share technicians but are not
+policy intent—rather than genuinely global coordination demand.
+
+Three graph definitions are evaluated on every pre-resolution decision state:
+
+1. `all_feasible`: all currently feasible non-wait production and maintenance
+   actions, reproducing the prior graph;
+2. `production_only`: all currently feasible production actions, excluding
+   technician edges;
+3. `policy_intent_top2`: the greedy action and next-highest-Q feasible action
+   for every agent. Wait may be selected but carries no resource edge.
+
+All graphs contain all six machine agents and retain isolated nodes. An edge
+means that two included actions can target the same production operation or
+technician. The observed conflict-edge set is constructed from the greedy joint
+proposal before the deterministic resolver; it is used only as a diagnostic
+label.
+
+- H1: `all_feasible` reproduces the earlier QMIX architecture-gate failure.
+- H2: at least one refined graph passes the locked topology rule: mean largest
+  component size at most 3.5, at least 50% of epochs containing a component of
+  size 2 or 3, and at most 10% of epochs fully connecting all six machines.
+- H3: a graph is architecture-viable only if its pooled edge recall is at least
+  95% and precision is at least 30% for observed greedy-proposal conflict edges.
+
+A refined graph supports a QSCAN-style follow-up only if H2 and H3 both hold.
+Otherwise the result favors a full-team QPLEX mixer with graph features used as
+soft context rather than hard partitions.
+
+## Locked models, seeds, and stopping rule
+
+- Source run: completed IQL/QMIX MARL budget screen.
+- Checkpoint: 300,000 steps; inherited training seed `76000`.
+- Primary condition: QMIX. IQL is a paired trajectory-distribution robustness
+  condition and does not select the architecture.
+- Full development evaluation seeds: `61900:61950`.
+- macOS smoke seeds: `61990:61993`.
+- Sealed future test seeds: `62000:62100`; they remain unopened.
+- Evaluation only, with CPU smoke and CUDA-supported full execution.
+
+Every condition/seed cell runs once to completion. Stop on a missing or
+incompatible source artifact, sealed-seed overlap, malformed graph partition,
+greedy-action mismatch, conflict-label/resolver disagreement, invalid or
+duplicate execution, failed reward/objective identity, or any exception. There
+is no training, retry, tuning, or data-dependent stopping.
+
+## Metrics
+
+For each condition and graph definition, the primary epoch-weighted topology
+metrics are mean largest connected-component size, fraction of epochs containing
+a component of size 2 or 3, and fraction fully connected. Secondary topology
+metrics are mean component size including singletons, mean non-singleton size,
+isolated-agent count, graph density, and production/technician edge counts.
+
+Predictive validity is summarized from pooled pairwise edge true positives,
+false positives, and false negatives against the greedy-proposal conflict-edge
+set. Edge precision and recall are the locked decision metrics. Epoch-level
+conflict-presence precision/recall and episode-level normal-approximation 95%
+intervals are descriptive. Objective, makespan, failures, maintenance counts,
+resolver conflicts, and feasibility audits verify replay fidelity rather than
+select a graph.
+
+## Artifact schema and gates
+
+Each new timestamped directory contains:
+
+- `environment_attribution_manifest.json` with source hashes, commits, device,
+  seeds, checkpoint, definitions, thresholds, and completion status;
+- source `benchmark_config.json` and `scaled_config.json` snapshots;
+- `environment_attribution_epochs.partial.csv` and final `.csv`, in long form
+  with three rows per joint epoch;
+- `environment_attribution_episodes.partial.csv` and final `.csv`;
+- `environment_attribution_summary.json` with topology, predictive validity,
+  architecture decisions, and audit gate.
+
+Smoke passes only when both policies load, all six episodes finish, each joint
+epoch has exactly three graph rows, raw and summary schemas are complete,
+progress appears through `tqdm`, all reward/coordination/conflict-label audits
+pass, and the sealed panel remains closed. Full completion requires 100 episodes
+under the same gates.
+
+## Interpretation boundary
+
+This diagnostic compares graph definitions on trajectories generated by one
+training seed. It can attribute the previous topology result to action-set
+construction, but it cannot show that changing the environment or adding a
+graph mixer improves policy performance. `policy_intent_top2` uses the current
+policy's Q ordering and is therefore algorithm- and checkpoint-dependent.
+Precision/recall describe proposal-conflict labels, not causal operational cost.
+Development seeds are not held-out confirmation.
