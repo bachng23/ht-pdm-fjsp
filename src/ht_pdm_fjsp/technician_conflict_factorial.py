@@ -235,12 +235,32 @@ def _describe(values: Iterable[float]) -> dict[str, float]:
 class LiteratureFactorialSimulator:
     """Small event-driven simulator used only for the preregistered screen."""
 
-    def __init__(self, config: BenchmarkConfig, spec: FactorSpec, policy: str):
+    def __init__(
+        self,
+        config: BenchmarkConfig,
+        spec: FactorSpec,
+        policy: str,
+        *,
+        window_releases: Mapping[str, tuple[float, ...]] | None = None,
+        window_width: float = WINDOW_WIDTH,
+        unavailable_intervals: Mapping[str, tuple[tuple[float, float], ...]] | None = None,
+    ):
         if policy not in POLICIES:
             raise ValueError(f"Unknown assignment policy: {policy}")
         self.config = config
         self.spec = spec
         self.policy = policy
+        self.window_releases = (
+            WINDOW_RELEASES if window_releases is None else window_releases
+        )
+        self.window_width = float(window_width)
+        self.unavailable_intervals = (
+            UNAVAILABLE_INTERVALS
+            if unavailable_intervals is None
+            else unavailable_intervals
+        )
+        if self.window_width <= 0.0:
+            raise ValueError("window_width must be positive")
         self.machine_specs = {item.machine_id: item for item in config.machines}
         self.technician_specs = {item.technician_id: item for item in config.technicians}
         self.job_specs = {item.job_id: item for item in config.jobs}
@@ -307,8 +327,8 @@ class LiteratureFactorialSimulator:
         tasks: list[TaskRecord] = []
         pending: dict[str, MaintenanceDemand] = {}
         windows = [
-            MaintenanceWindow(machine_id, index, release, release + WINDOW_WIDTH)
-            for machine_id, releases in WINDOW_RELEASES.items()
+            MaintenanceWindow(machine_id, index, release, release + self.window_width)
+            for machine_id, releases in self.window_releases.items()
             for index, release in enumerate(releases)
         ] if self.spec.maintenance_windows else []
         now = 0.0
@@ -359,7 +379,7 @@ class LiteratureFactorialSimulator:
                 push_event(window.release, "window_boundary", {})
                 push_event(window.deadline, "window_deadline", {"machine_id": window.machine_id, "index": window.index})
         if self.spec.availability_calendar:
-            for intervals in UNAVAILABLE_INTERVALS.values():
+            for intervals in self.unavailable_intervals.values():
                 for start, end in intervals:
                     push_event(start, "calendar_boundary", {})
                     push_event(end, "calendar_boundary", {})
@@ -459,7 +479,13 @@ class LiteratureFactorialSimulator:
         def serviceable_map() -> dict[str, bool]:
             return {
                 technician_id: state.status == "idle"
-                and _is_on_shift(technician_id, now, self.spec.availability_calendar)
+                and (
+                    not self.spec.availability_calendar
+                    or not any(
+                        start - TIME_TOLERANCE <= now < end - TIME_TOLERANCE
+                        for start, end in self.unavailable_intervals.get(technician_id, ())
+                    )
+                )
                 for technician_id, state in technicians.items()
             }
 
