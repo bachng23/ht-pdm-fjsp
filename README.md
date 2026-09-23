@@ -152,6 +152,20 @@ This read-only diagnostic compares all-feasible, production-only, and policy
 top-2 intent graphs on identical trajectories. See
 `docs/environment_attribution_diagnostic_plan.md`.
 
+Test that policy-intent graph as soft centralized-training context in a
+capacity-matched full-team QPLEX mixer:
+
+```bash
+uv run ht-pdm-fjsp-qplex-soft-graph \
+  --profile smoke \
+  --device cpu \
+  --output-dir artifacts/qplex_soft_graph_smoke
+```
+
+The four-way ablation retains the exact feed-forward agent utility baseline and
+compares QMIX against QPLEX with null, all-feasible, and policy-intent top-2
+graph inputs. See `docs/qplex_soft_graph_ablation_plan.md`.
+
 The factorial follow-up completes the actor-sharing by broadcast-context design
 and adds a parameter-count-matched shared actor. Run it after the diagnostic
 artifacts are available:

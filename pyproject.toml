@@ -55,6 +55,7 @@ ht-pdm-fjsp-marl-budget-screen = "ht_pdm_fjsp.marl_budget_screening:main"
 ht-pdm-fjsp-qmix-fidelity = "ht_pdm_fjsp.qmix_fidelity_experiment:main"
 ht-pdm-fjsp-resource-graph = "ht_pdm_fjsp.resource_conflict_graph_experiment:main"
 ht-pdm-fjsp-environment-attribution = "ht_pdm_fjsp.environment_attribution_experiment:main"
+ht-pdm-fjsp-qplex-soft-graph = "ht_pdm_fjsp.qplex_soft_graph_experiment:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
