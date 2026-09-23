@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from collections import defaultdict
 from pathlib import Path
@@ -88,3 +89,59 @@ def test_smoke_run_writes_all_algorithm_artifacts(tmp_path: Path) -> None:
         "three_way_marl_coordination.csv",
         "three_way_marl_summary.json",
     }.issubset(set(manifest["output_files"]))
+
+
+def test_resume_skips_committed_cells_and_restarts_only_incomplete_cell(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "three_way_marl_resume_20260923T000000Z"
+    arguments = argparse.Namespace(
+        config=str(CONFIG_PATH),
+        profile="smoke",
+        train_seeds="75000",
+        evaluation_seeds="61990:61992",
+        total_timesteps=64,
+        device="cpu",
+        output_dir=str(output),
+        resume=False,
+    )
+    run(arguments)
+    manifest_path = output / "three_way_marl_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    committed = manifest["completed_cells"][:2]
+    manifest["status"] = "RUNNING"
+    manifest["completed_cells"] = committed
+    manifest["training_seconds"] = {
+        key: manifest["training_seconds"][key] for key in committed
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+    for filename in (
+        "three_way_marl_episodes.partial.csv",
+        "three_way_marl_decisions.partial.csv",
+        "three_way_marl_coordination.partial.csv",
+    ):
+        path = output / filename
+        with path.open(newline="", encoding="utf-8") as stream:
+            rows = [
+                row
+                for row in csv.DictReader(stream)
+                if row["condition"] != CONDITIONS[2]
+            ]
+        with path.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+
+    arguments.resume = True
+    run(arguments)
+    resumed = json.loads(manifest_path.read_text())
+    assert resumed["status"] == "COMPLETED"
+    assert resumed["episode_count"] == 6
+    assert len(resumed["resume_history"]) == 1
+    assert resumed["resume_history"][0]["skipped_completed_cells"] == sorted(
+        committed
+    )
+    assert resumed["resume_history"][0]["restarted_incomplete_cells"] == [
+        f"{CONDITIONS[2]}:75000"
+    ]

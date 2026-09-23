@@ -85,3 +85,12 @@ decision and coordination CSVs (including partial files), summary JSON, training
 curves, five recovery checkpoints and final model per cell.  Success requires
 all expected cells/episodes, zero invalid or duplicate executions, at least one
 baseline meeting H1, and positive precedence blocking at every three-way step.
+
+An interrupted run may be migrated between hosts and continued with `--resume`.
+Resume is fail-closed: profile, config hashes, seed panels, budget, settings,
+sealed holdout state, committed row counts, and final model files must match.
+Only cells listed in the manifest's `completed_cells` are skipped.  A partially
+trained, uncommitted cell is restarted from step zero because optimizer and
+replay-buffer state are deliberately not represented by the recovery model
+checkpoints.  Device changes such as CPU to CUDA are recorded in
+`resume_history` and do not alter the locked experimental design.

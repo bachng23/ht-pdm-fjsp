@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import math
 import platform
 import statistics
 import sys
+from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -40,6 +42,106 @@ QMIX = "qmix"
 MAPPO = "independent_actor_mappo_global_critic"
 CONDITIONS = (IQL, QMIX, MAPPO)
 T_CRITICAL_975_DF4 = 2.776
+
+
+def _read_csv(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    with path.open(newline="", encoding="utf-8") as stream:
+        return list(csv.DictReader(stream))
+
+
+def _settings_without_device(values: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in values.items() if key != "device"}
+
+
+def _load_resume_state(
+    output_dir: Path,
+    *,
+    profile: str,
+    base_config_sha256: str,
+    scaled_config_sha256: str,
+    train_seeds: tuple[int, ...],
+    evaluation_seeds: tuple[int, ...],
+    total_timesteps: int,
+    value_settings: ValueLearningSettings,
+    mappo_settings: DiagnosticSettings,
+) -> tuple[
+    dict[str, Any],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    manifest_path = output_dir / "three_way_marl_manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Resume manifest not found: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text())
+    checks = {
+        "status": manifest.get("status") == "RUNNING",
+        "profile": manifest.get("profile") == profile,
+        "base_config": manifest.get("base_config_sha256") == base_config_sha256,
+        "scaled_config": manifest.get("scaled_config_sha256") == scaled_config_sha256,
+        "conditions": tuple(manifest.get("conditions", ())) == CONDITIONS,
+        "train_seeds": tuple(
+            int(seed) for seed in manifest.get("train_seeds", ())
+        )
+        == train_seeds,
+        "evaluation_seeds": tuple(
+            int(seed) for seed in manifest.get("evaluation_seeds", ())
+        )
+        == evaluation_seeds,
+        "holdout_closed": manifest.get("future_test_panel_opened") is False,
+        "total_timesteps": int(manifest.get("total_timesteps_per_model", -1))
+        == total_timesteps,
+        "value_settings": _settings_without_device(manifest.get("value_settings", {}))
+        == _settings_without_device(value_settings.__dict__),
+        "mappo_settings": _settings_without_device(manifest.get("mappo_settings", {}))
+        == _settings_without_device(mappo_settings.__dict__),
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        raise ValueError(f"Resume contract mismatch: {', '.join(failed)}")
+
+    episode_rows = _read_csv(output_dir / "three_way_marl_episodes.partial.csv")
+    decision_rows = _read_csv(output_dir / "three_way_marl_decisions.partial.csv")
+    coordination_rows = _read_csv(
+        output_dir / "three_way_marl_coordination.partial.csv"
+    )
+    completed = list(dict.fromkeys(map(str, manifest.get("completed_cells", ()))))
+    expected_keys = {
+        f"{condition}:{seed}" for condition in CONDITIONS for seed in train_seeds
+    }
+    if not set(completed) <= expected_keys:
+        raise ValueError("Resume manifest contains an unknown completed cell")
+    for cell_key in completed:
+        condition, raw_seed = cell_key.rsplit(":", 1)
+        train_seed = int(raw_seed)
+        episodes = [
+            row
+            for row in episode_rows
+            if row["condition"] == condition
+            and int(row["train_seed"]) == train_seed
+        ]
+        coordination = [
+            row
+            for row in coordination_rows
+            if row["condition"] == condition
+            and int(row["train_seed"]) == train_seed
+        ]
+        model_name = "model.pt" if condition in (IQL, QMIX) else "policy.pt"
+        model_path = output_dir / condition / f"train_seed_{train_seed}" / model_name
+        if (
+            len(episodes) != len(evaluation_seeds)
+            or len(coordination) != len(evaluation_seeds)
+            or not model_path.is_file()
+        ):
+            raise ValueError(f"Completed cell is missing artifacts: {cell_key}")
+    row_cells = {
+        f"{row['condition']}:{int(row['train_seed'])}" for row in episode_rows
+    }
+    if not row_cells <= set(completed):
+        raise ValueError("Partial episode CSV contains an uncommitted cell")
+    return manifest, episode_rows, decision_rows, coordination_rows
 
 
 def defaults(profile: str) -> dict[str, Any]:
@@ -320,7 +422,8 @@ def summarize(
 
 def run(args: argparse.Namespace) -> Path:
     output_dir = Path(args.output_dir).resolve()
-    if output_dir.exists() and any(output_dir.iterdir()):
+    resume = bool(getattr(args, "resume", False))
+    if not resume and output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(f"Output directory is not empty: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     profile = defaults(args.profile)
@@ -372,7 +475,7 @@ def run(args: argparse.Namespace) -> Path:
         device=device,
     )
     manifest_path = output_dir / "three_way_marl_manifest.json"
-    manifest: dict[str, Any] = {
+    new_manifest: dict[str, Any] = {
         "status": "RUNNING",
         "profile": args.profile,
         "git_commit": _git_revision(),
@@ -396,13 +499,65 @@ def run(args: argparse.Namespace) -> Path:
             **{name: version(name) for name in ("numpy", "torch")},
         },
     }
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    episode_rows: list[dict[str, Any]] = []
-    decision_rows: list[dict[str, Any]] = []
-    coordination_rows: list[dict[str, Any]] = []
-    training_seconds: dict[str, float] = {}
+    if resume:
+        manifest, episode_rows, decision_rows, coordination_rows = _load_resume_state(
+            output_dir,
+            profile=args.profile,
+            base_config_sha256=new_manifest["base_config_sha256"],
+            scaled_config_sha256=new_manifest["scaled_config_sha256"],
+            train_seeds=train_seeds,
+            evaluation_seeds=evaluation_seeds,
+            total_timesteps=total_timesteps,
+            value_settings=value_settings,
+            mappo_settings=mappo_settings,
+        )
+        completed_set = set(map(str, manifest["completed_cells"]))
+        incomplete_directories = sorted(
+            cell_key
+            for cell_key in (
+                f"{condition}:{seed}"
+                for condition in CONDITIONS
+                for seed in train_seeds
+            )
+            if cell_key not in completed_set
+            and (
+                output_dir
+                / cell_key.rsplit(":", 1)[0]
+                / f"train_seed_{cell_key.rsplit(':', 1)[1]}"
+            ).exists()
+        )
+        manifest.setdefault("resume_history", []).append(
+            {
+                "resumed_at_utc": datetime.now(UTC).isoformat(),
+                "git_commit": _git_revision(),
+                "requested_device": args.device,
+                "resolved_device": device,
+                "skipped_completed_cells": sorted(completed_set),
+                "restarted_incomplete_cells": incomplete_directories,
+            }
+        )
+        manifest["requested_device"] = args.device
+        manifest["resolved_device"] = device
+        manifest["runtime"] = new_manifest["runtime"]
+        manifest["value_settings"]["device"] = device
+        manifest["mappo_settings"]["device"] = device
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    else:
+        manifest = new_manifest
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        episode_rows = []
+        decision_rows = []
+        coordination_rows = []
+    training_seconds: dict[str, float] = {
+        key: float(value)
+        for key, value in manifest.get("training_seconds", {}).items()
+    }
+    completed_cells = set(map(str, manifest["completed_cells"]))
     for condition in CONDITIONS:
         for train_seed in tqdm(train_seeds, desc=f"Train/evaluate {condition}", unit="model"):
+            cell_key = f"{condition}:{train_seed}"
+            if cell_key in completed_cells:
+                continue
             cell = output_dir / condition / f"train_seed_{train_seed}"
             if condition in (IQL, QMIX):
                 policy, elapsed = train_value_policy(
@@ -437,9 +592,9 @@ def run(args: argparse.Namespace) -> Path:
                 episode_rows.append(episode)
                 decision_rows.extend(decisions)
                 coordination_rows.append(coordination)
-            cell_key = f"{condition}:{train_seed}"
             training_seconds[cell_key] = elapsed
             manifest["completed_cells"].append(cell_key)
+            completed_cells.add(cell_key)
             manifest["training_seconds"] = training_seconds
             _write_csv(episode_rows, output_dir / "three_way_marl_episodes.partial.csv")
             _write_csv(decision_rows, output_dir / "three_way_marl_decisions.partial.csv")
@@ -485,6 +640,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--total-timesteps", type=int)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--resume", action="store_true")
     return parser
 
 
