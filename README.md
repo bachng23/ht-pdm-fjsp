@@ -123,6 +123,21 @@ uv run ht-pdm-fjsp-marl-diagnostic \
 See `docs/marl_diagnostic_plan.md` for the locked hypotheses, metrics, seeds,
 stopping rule, artifact schema, and Ubuntu workflow.
 
+Measure whether feasible operation and technician overlaps form small dynamic
+machine-agent subteams before implementing a graph-aware value decomposition:
+
+```bash
+uv run ht-pdm-fjsp-resource-graph \
+  --profile smoke \
+  --device cpu \
+  --source-run lab_results/marl_budget_screen_iql_qmix_full_cpu_20260923T030641Z \
+  --output-dir artifacts/resource_graph_smoke
+```
+
+The diagnostic replays the locked 300k IQL and QMIX checkpoints, records the
+six-agent resource-conflict graph at every dispatch epoch, and keeps the future
+test panel sealed. See `docs/resource_conflict_graph_diagnostic_plan.md`.
+
 The factorial follow-up completes the actor-sharing by broadcast-context design
 and adds a parameter-count-matched shared actor. Run it after the diagnostic
 artifacts are available:
