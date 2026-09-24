@@ -1,9 +1,9 @@
 """Small, self-contained MARL benchmark for passive shared technicians.
 
 The simulator deliberately has no technician learning, absence, substitution,
-experience, maintenance windows, or hidden side effects.  A machine chooses
+experience, maintenance windows, or hidden side effects. A machine chooses
 defer or a technician; simultaneous technician collisions are resolved by the
-same deterministic rule for every policy.
+same deterministic rule for every policy, while failure events are stochastic.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import itertools
 import json
 import math
 import random
@@ -32,12 +33,14 @@ class PassiveConfig:
     technicians: int = 2
     horizon: int = 12
     failure_age: int = 5
+    failure_probability: float = 0.45
     max_age: int = 8
     service_time: tuple[tuple[int, ...], ...] = ((2, 4), (4, 2), (3, 3))
     maintenance_cost: float = 1.0
     downtime_cost: float = 8.0
     failure_cost: float = 15.0
     collision_cost: float = 4.0
+    semantics: str = "fifo_queue"
 
     def validate(self) -> None:
         if self.machines < 1 or self.technicians < 1 or self.horizon < 1:
@@ -46,6 +49,8 @@ class PassiveConfig:
             raise ValueError("service_time must have one row per machine")
         if any(len(row) != self.technicians for row in self.service_time):
             raise ValueError("service_time must have one entry per technician")
+        if self.semantics not in {"fifo_queue", "priority_resolver", "invalid_collision"}:
+            raise ValueError("unsupported technician conflict semantics")
 
 
 @dataclass(frozen=True)
@@ -54,10 +59,11 @@ class PassiveState:
     failed: tuple[bool, ...]
     busy_until: tuple[int, ...]
     assigned_machine: tuple[int, ...]
+    queues: tuple[tuple[int, ...], ...]
 
 
 class PassiveTechnicianEnv:
-    """Finite-horizon deterministic maintenance environment."""
+    """Finite-horizon maintenance environment with seeded failure events."""
 
     def __init__(self, config: PassiveConfig, *, seed: int = 0):
         config.validate()
@@ -74,6 +80,7 @@ class PassiveTechnicianEnv:
             failed=tuple(False for _ in range(self.config.machines)),
             busy_until=tuple(0 for _ in range(self.config.technicians)),
             assigned_machine=tuple(-1 for _ in range(self.config.technicians)),
+            queues=tuple(tuple() for _ in range(self.config.technicians)),
         )
 
     def reset(self) -> tuple[int, ...]:
@@ -92,13 +99,22 @@ class PassiveTechnicianEnv:
             int(self.state.ages[machine])
             + self.config.max_age * int(self.state.failed[machine])
             + (self.config.max_age + 1) * 2 * available
+            + (self.config.max_age + 1) * 2 * self.config.technicians * int(
+                any(machine in queue for queue in self.state.queues)
+            )
             for machine in range(self.config.machines)
         )
 
     def available(self, technician: int) -> bool:
         return self.state.busy_until[technician] <= self.time
 
-    def transition(self, state: PassiveState, actions: tuple[int, ...], time: int) -> tuple[PassiveState, float, dict[str, float]]:
+    def transition(
+        self,
+        state: PassiveState,
+        actions: tuple[int, ...],
+        time: int,
+        failure_events: tuple[bool, ...] | None = None,
+    ) -> tuple[PassiveState, float, dict[str, float]]:
         cfg = self.config
         if len(actions) != cfg.machines or any(a < 0 or a > cfg.technicians for a in actions):
             raise ValueError("one action in {0..technicians} is required per machine")
@@ -107,16 +123,29 @@ class PassiveTechnicianEnv:
             if action:
                 selected.setdefault(action - 1, []).append(machine)
         accepted: dict[int, int] = {}
-        collisions = 0
-        waiting = 0
-        for technician, machines in selected.items():
-            if len(machines) > 1:
-                collisions += len(machines) - 1
-            if state.busy_until[technician] > time:
-                waiting += len(machines)
-            else:
-                accepted[technician] = min(machines)
-                waiting += max(0, len(machines) - 1)
+        collisions = sum(max(0, len(machines) - 1) for machines in selected.values())
+        queues = [list(queue) for queue in state.queues]
+        if cfg.semantics == "fifo_queue":
+            queued = {machine for queue in queues for machine in queue}
+            for technician, machines in selected.items():
+                for machine in machines:
+                    if machine not in queued:
+                        queues[technician].append(machine)
+                        queued.add(machine)
+            for technician in range(cfg.technicians):
+                if state.busy_until[technician] <= time and queues[technician]:
+                    accepted[technician] = queues[technician].pop(0)
+            waiting = sum(len(queue) for queue in queues)
+        else:
+            waiting = 0
+            for technician, machines in selected.items():
+                if cfg.semantics == "invalid_collision" and len(machines) > 1:
+                    continue
+                if state.busy_until[technician] > time:
+                    waiting += len(machines)
+                else:
+                    accepted[technician] = min(machines)
+                    waiting += max(0, len(machines) - 1)
 
         ages = list(state.ages)
         failed = list(state.failed)
@@ -140,20 +169,32 @@ class PassiveTechnicianEnv:
         for machine in range(cfg.machines):
             if machine not in accepted.values():
                 ages[machine] = min(cfg.max_age, ages[machine] + 1)
-                if ages[machine] >= cfg.failure_age and not failed[machine]:
+                deterministic_failure = ages[machine] >= cfg.failure_age
+                sampled_failure = failure_events is None or failure_events[machine]
+                if deterministic_failure and sampled_failure and not failed[machine]:
                     failed[machine] = True
                     failures += 1
                     objective += cfg.failure_cost
         for technician in range(cfg.technicians):
             if busy_until[technician] <= time + 1:
                 assigned[technician] = -1
-        objective += cfg.collision_cost * collisions
-        next_state = PassiveState(tuple(ages), tuple(failed), tuple(busy_until), tuple(assigned))
+        if cfg.semantics in {"priority_resolver", "invalid_collision"}:
+            objective += cfg.collision_cost * collisions
+        next_state = PassiveState(
+            tuple(ages), tuple(failed), tuple(busy_until), tuple(assigned),
+            tuple(tuple(queue) for queue in queues),
+        )
         info = {"objective": objective, "failures": failures, "jobs": jobs, "collisions": collisions, "waiting": waiting}
         return next_state, objective, info
 
     def step(self, actions: Iterable[int]) -> tuple[tuple[int, ...], float, bool, dict[str, float]]:
-        next_state, cost, info = self.transition(self.state, tuple(actions), self.time)
+        events = tuple(
+            self.rng.random() < self.config.failure_probability
+            if (not failed and age + 1 >= self.config.failure_age)
+            else False
+            for age, failed in zip(self.state.ages, self.state.failed)
+        )
+        next_state, cost, info = self.transition(self.state, tuple(actions), self.time, events)
         self.state = next_state
         self.time += 1
         for key, value in info.items():
@@ -185,11 +226,11 @@ def evaluate_policy(config: PassiveConfig, policy, seed: int) -> dict[str, float
     done = False
     while not done:
         _, _, done, _ = env.step(policy(env))
-    return {"policy": getattr(policy, "__name__", "policy"), "seed": seed, **env.metrics}
+    return {"policy": getattr(policy, "__name__", "policy"), "seed": seed, "train_seed": "", **env.metrics}
 
 
 def exact_optimum(config: PassiveConfig) -> float:
-    """Return the optimal cost for the deterministic finite-horizon instance."""
+    """Return the optimal expected cost for the stochastic finite-horizon instance."""
     config.validate()
 
     @lru_cache(maxsize=None)
@@ -199,8 +240,26 @@ def exact_optimum(config: PassiveConfig) -> float:
         best = math.inf
         # Enumerate the joint action space; this is intentionally only for tiny instances.
         for actions in np.ndindex(*(config.technicians + 1 for _ in range(config.machines))):
-            next_state, cost, _ = PassiveTechnicianEnv(config).transition(state, actions, time)
-            best = min(best, cost + solve(time + 1, next_state))
+            eligible = tuple(
+                not failed and age + 1 >= config.failure_age
+                for age, failed in zip(state.ages, state.failed)
+            )
+            expected = 0.0
+            for events in itertools.product((False, True), repeat=config.machines):
+                probability = 1.0
+                for is_eligible, event in zip(eligible, events):
+                    if not is_eligible:
+                        probability *= float(not event)
+                    else:
+                        p = config.failure_probability
+                        probability *= p if event else 1.0 - p
+                if probability == 0.0:
+                    continue
+                next_state, cost, _ = PassiveTechnicianEnv(config).transition(
+                    state, actions, time, events
+                )
+                expected += probability * (cost + solve(time + 1, next_state))
+            best = min(best, expected)
         return best
 
     return solve(0, PassiveTechnicianEnv(config).initial_state())
@@ -263,14 +322,14 @@ def train_independent(config: PassiveConfig, seed: int, episodes: int) -> Indepe
     return learner
 
 
-def evaluate_marl(config: PassiveConfig, learner: IndependentQ, seed: int) -> dict[str, float | int | str]:
+def evaluate_marl(config: PassiveConfig, learner: IndependentQ, seed: int, train_seed: int) -> dict[str, float | int | str]:
     env = PassiveTechnicianEnv(config, seed=seed)
     obs = env.reset()
     done = False
     while not done:
         actions = tuple(learner.action(m, obs[m], 0.0) for m in range(config.machines))
         obs, _, done, _ = env.step(actions)
-    return {"policy": "independent_marl", "seed": seed, **env.metrics}
+    return {"policy": "independent_marl", "seed": seed, "train_seed": train_seed, **env.metrics}
 
 
 def _write_csv(rows: list[dict], path: Path) -> None:
@@ -283,7 +342,15 @@ def _write_csv(rows: list[dict], path: Path) -> None:
 
 
 def run(args: argparse.Namespace) -> Path:
-    config = PassiveConfig()
+    # Keep the main comparison small enough that exact expected DP remains exact.
+    config = PassiveConfig(
+        machines=2,
+        technicians=2,
+        horizon=6,
+        failure_age=3,
+        max_age=5,
+        service_time=((2, 4), (4, 2)),
+    )
     if args.profile == "smoke":
         train_seeds, eval_seeds, episodes = (11,), (101, 102, 103), 40
     elif args.profile == "pilot":
@@ -312,7 +379,7 @@ def run(args: argparse.Namespace) -> Path:
         learner = IndependentQ.load(model_path, config, seed=seed)
         progress_rows.append({"algorithm": "independent_marl", "train_seed": seed, "episodes": episodes, "checkpoint": str(model_path.relative_to(output))})
         for eval_seed in tqdm(eval_seeds, desc=f"evaluate seed {seed}", unit="episode", leave=False):
-            rows.append(evaluate_marl(config, learner, eval_seed))
+            rows.append(evaluate_marl(config, learner, eval_seed, seed))
         _write_csv(rows, output / "episodes.partial.csv")
     _write_csv(progress_rows, output / "training_progress.csv")
     _write_csv(rows, output / "episodes.csv")

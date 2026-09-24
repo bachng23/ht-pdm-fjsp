@@ -5,10 +5,17 @@ learning agents. Technicians are passive shared resources with fixed,
 machine-dependent service times. There is no technician learning, absence,
 substitution, experience, window, or commitment mechanism.
 
-The research question is whether independent machine agents can learn when to
+The current exact-comparison cell uses two machines, two heterogeneous
+technicians, and a six-step horizon so the expected dynamic program remains
+tractable. Larger cells can be added after the semantics and transition tests
+are locked. The research question is whether independent machine agents can learn when to
 request maintenance and which heterogeneous technician to request. The same
 finite-horizon transition function is used by independent MARL, a skill-aware
 risk-first dispatcher, and exact dynamic programming on the small instance.
+
+Failure events are sampled independently when an operating machine reaches the
+failure-age threshold; the episode seed controls these draws. The exact solver
+minimizes expected finite-horizon cost under this same failure model.
 
 The primary metric is total maintenance objective (lower is better). Secondary
 metrics are failures, maintenance jobs, waiting requests, and collision count.
