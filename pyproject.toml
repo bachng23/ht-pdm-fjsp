@@ -58,6 +58,7 @@ ht-pdm-fjsp-environment-attribution = "ht_pdm_fjsp.environment_attribution_exper
 ht-pdm-fjsp-qplex-soft-graph = "ht_pdm_fjsp.qplex_soft_graph_experiment:main"
 ht-pdm-fjsp-technician-factorial = "ht_pdm_fjsp.technician_conflict_factorial:main"
 ht-pdm-fjsp-technician-window-calibration = "ht_pdm_fjsp.technician_window_calibration:main"
+ht-pdm-fjsp-technician-cluster-mixture = "ht_pdm_fjsp.technician_cluster_mixture:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
