@@ -62,6 +62,7 @@ ht-pdm-fjsp-technician-cluster-mixture = "ht_pdm_fjsp.technician_cluster_mixture
 ht-pdm-fjsp-parallel-maintenance = "ht_pdm_fjsp.parallel_maintenance_experiment:main"
 ht-pdm-fjsp-parallel-calibration = "ht_pdm_fjsp.parallel_maintenance_calibration:main"
 ht-pdm-fjsp-conflict-consequence = "ht_pdm_fjsp.conflict_consequence:main"
+ht-pdm-fjsp-clean-conflict = "ht_pdm_fjsp.clean_conflict_attribution:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
