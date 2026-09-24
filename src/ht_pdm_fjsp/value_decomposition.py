@@ -75,7 +75,7 @@ class QMixer(nn.Module):
 
 
 class ValueDecompositionPolicy(nn.Module):
-    VALID_ALGORITHMS = {"iql", "qmix"}
+    VALID_ALGORITHMS = {"iql", "vdn", "qmix"}
 
     def __init__(
         self,
@@ -107,7 +107,7 @@ class ValueDecompositionPolicy(nn.Module):
         )
 
     def q_values(self, local_observations: th.Tensor) -> th.Tensor:
-        if self.algorithm == "qmix":
+        if self.algorithm in {"vdn", "qmix"}:
             return self.agent_networks[0](local_observations).squeeze(-1)
         return th.stack(
             [
@@ -250,6 +250,16 @@ def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _write_training_episodes(rows: list[dict[str, Any]], path: Path) -> None:
+    if rows:
+        _write_csv(rows, path)
+        return
+    path.write_text(
+        "train_seed,environment_rank,episode,episode_return,joint_steps\n",
+        encoding="utf-8",
+    )
 
 
 def _stack_observations(
@@ -415,6 +425,10 @@ def train_value_policy(
                     predicted = model.mixer(chosen, state)
                     with th.no_grad():
                         target_value = rewards + settings.gamma * (1.0 - dones) * target.mixer(next_q, next_state)
+                elif algorithm == "vdn":
+                    predicted = chosen.sum(dim=-1)
+                    with th.no_grad():
+                        target_value = rewards + settings.gamma * (1.0 - dones) * next_q.sum(dim=-1)
                 else:
                     predicted = chosen
                     target_value = rewards.unsqueeze(-1) + settings.gamma * (1.0 - dones).unsqueeze(-1) * next_q
@@ -465,7 +479,7 @@ def train_value_policy(
     (output_dir / "settings.json").write_text(
         json.dumps(asdict(settings), indent=2, sort_keys=True) + "\n"
     )
-    _write_csv(episode_rows, output_dir / "training_episodes.csv")
+    _write_training_episodes(episode_rows, output_dir / "training_episodes.csv")
     _write_csv(update_rows, output_dir / "training_progress.csv")
     for current_env in envs:
         current_env.close()

@@ -25,10 +25,10 @@ def _config() -> BenchmarkConfig:
     return build_condition_config(base, topology="two_specialists", multiplier=2.0)
 
 
-def test_iql_and_qmix_respect_action_masks() -> None:
+def test_iql_vdn_and_qmix_respect_action_masks() -> None:
     env = MachineAgentsCTDEEnv(_config(), wait_policy="safe_noop")
     observation, _ = env.reset(seed=1)
-    for algorithm in ("iql", "qmix"):
+    for algorithm in ("iql", "vdn", "qmix"):
         policy = ValueDecompositionPolicy(
             algorithm=algorithm,
             agent_count=env.num_agents,
@@ -42,14 +42,14 @@ def test_iql_and_qmix_respect_action_masks() -> None:
         )
 
 
-def test_iql_and_qmix_batch_action_inference_respects_masks() -> None:
+def test_iql_vdn_and_qmix_batch_action_inference_respects_masks() -> None:
     envs = [MachineAgentsCTDEEnv(_config(), wait_policy="safe_noop") for _ in range(4)]
     observations = [env.reset(seed=index)[0] for index, env in enumerate(envs)]
     batched = {
         key: np.stack([observation[key] for observation in observations])
         for key in observations[0]
     }
-    for algorithm in ("iql", "qmix"):
+    for algorithm in ("iql", "vdn", "qmix"):
         policy = ValueDecompositionPolicy(
             algorithm=algorithm,
             agent_count=envs[0].num_agents,
@@ -95,7 +95,7 @@ def test_tiny_value_training_saves_loadable_models(tmp_path: Path) -> None:
         device="cpu",
         n_envs=4,
     )
-    for algorithm in ("iql", "qmix"):
+    for algorithm in ("iql", "vdn", "qmix"):
         output = tmp_path / algorithm
         train_value_policy(
             _config(),
