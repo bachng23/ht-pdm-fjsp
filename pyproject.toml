@@ -64,6 +64,7 @@ ht-pdm-fjsp-parallel-calibration = "ht_pdm_fjsp.parallel_maintenance_calibration
 ht-pdm-fjsp-conflict-consequence = "ht_pdm_fjsp.conflict_consequence:main"
 ht-pdm-fjsp-clean-conflict = "ht_pdm_fjsp.clean_conflict_attribution:main"
 ht-pdm-fjsp-committed-rl-baselines = "ht_pdm_fjsp.committed_conflict_rl_experiment:main"
+ht-pdm-fjsp-coordination-stress = "ht_pdm_fjsp.coordination_stress_baselines:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

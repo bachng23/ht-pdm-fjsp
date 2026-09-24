@@ -26,6 +26,7 @@ from ht_pdm_fjsp.centralized_joint_dqn import (
 from ht_pdm_fjsp.committed_conflict_rl import COMMITTED_CELL, CommittedConflictCTDEEnv
 from ht_pdm_fjsp.conflict_consequence import (
     SEALED_TEST_SEEDS,
+    ConsequenceCell,
     build_cell_config,
     evaluate_episode as evaluate_heuristic_episode,
 )
@@ -52,6 +53,8 @@ METRICS = (
     "conflict_steps",
     "rejected_requests",
     "committed_wait_steps",
+    "missed_windows",
+    "overdue_steps",
     "rework",
     "workload_imbalance",
 )
@@ -152,8 +155,10 @@ def evaluate_learned_episode(
     checkpoint_steps: int,
     seed: int,
     device: str,
+    cell: ConsequenceCell = COMMITTED_CELL,
+    record_decisions: bool = True,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
-    env = CommittedConflictCTDEEnv(base_config)
+    env = CommittedConflictCTDEEnv(base_config, cell)
     observation, _ = env.reset(seed=seed)
     decisions: list[dict[str, Any]] = []
     done = False
@@ -162,22 +167,23 @@ def evaluate_learned_episode(
         actions = policy.act(observation, deterministic=True, device=device)
         observation, _, terminated, truncated, info = env.step(actions)
         done = terminated or truncated
-        decision = env.core.last_decision
-        decisions.append(
-            {
-                "algorithm": algorithm,
-                "train_seed": train_seed,
-                "checkpoint_steps": checkpoint_steps,
-                "seed": seed,
-                "step": decision["step"],
-                "actions": json.dumps(decision["actions"]),
-                "accepted": json.dumps(decision["accepted"]),
-                "rejected": json.dumps(decision["rejected"]),
-                "proposal_conflicts": decision["proposal_conflicts"],
-                "incremental_cost": decision["incremental_cost"],
-                "reward": decision["reward"],
-            }
-        )
+        if record_decisions:
+            decision = env.core.last_decision
+            decisions.append(
+                {
+                    "algorithm": algorithm,
+                    "train_seed": train_seed,
+                    "checkpoint_steps": checkpoint_steps,
+                    "seed": seed,
+                    "step": decision["step"],
+                    "actions": json.dumps(decision["actions"]),
+                    "accepted": json.dumps(decision["accepted"]),
+                    "rejected": json.dumps(decision["rejected"]),
+                    "proposal_conflicts": decision["proposal_conflicts"],
+                    "incremental_cost": decision["incremental_cost"],
+                    "reward": decision["reward"],
+                }
+            )
     episode = _episode_from_info(
         info,
         algorithm=algorithm,

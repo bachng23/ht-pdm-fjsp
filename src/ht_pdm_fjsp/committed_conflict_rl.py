@@ -13,6 +13,7 @@ from ht_pdm_fjsp.conflict_consequence import (
     WORKING,
     ConflictConsequenceEnv,
     ConsequenceCell,
+    ConsequenceCell,
     build_cell_config,
 )
 from ht_pdm_fjsp.parallel_maintenance import ParallelMaintenanceConfig
@@ -24,9 +25,13 @@ COMMITTED_CELL = ConsequenceCell(True, False, False)
 class CommittedConflictCTDEEnv:
     """Machine-agent CTDE view without changing the validated transition kernel."""
 
-    def __init__(self, base_config: ParallelMaintenanceConfig) -> None:
-        self.config = build_cell_config(base_config, COMMITTED_CELL)
-        self.core = ConflictConsequenceEnv(self.config, COMMITTED_CELL)
+    def __init__(
+        self,
+        base_config: ParallelMaintenanceConfig,
+        cell: ConsequenceCell = COMMITTED_CELL,
+    ) -> None:
+        self.config = build_cell_config(base_config, cell)
+        self.core = ConflictConsequenceEnv(self.config, cell)
         self.num_agents = self.core.num_agents
         self.action_count = self.core.action_count
         self.max_local_actions = self.action_count
