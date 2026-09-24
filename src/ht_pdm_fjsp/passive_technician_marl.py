@@ -27,6 +27,10 @@ import numpy as np
 from tqdm.auto import tqdm
 
 
+OBJECTIVE_VERSION = "fifo_queue_waiting_v1"
+OBSERVATION_VERSION = "resource_aware_v1"
+
+
 @dataclass(frozen=True)
 class PassiveConfig:
     machines: int = 3
@@ -39,8 +43,13 @@ class PassiveConfig:
     maintenance_cost: float = 1.0
     downtime_cost: float = 8.0
     failure_cost: float = 15.0
+    queue_waiting_cost: float = 0.5
     collision_cost: float = 4.0
     semantics: str = "fifo_queue"
+
+    @property
+    def observation_dim(self) -> int:
+        return 3 + 6 * self.technicians
 
     def validate(self) -> None:
         if self.machines < 1 or self.technicians < 1 or self.horizon < 1:
@@ -49,6 +58,8 @@ class PassiveConfig:
             raise ValueError("service_time must have one row per machine")
         if any(len(row) != self.technicians for row in self.service_time):
             raise ValueError("service_time must have one entry per technician")
+        if self.queue_waiting_cost < 0:
+            raise ValueError("queue_waiting_cost must be non-negative")
         if self.semantics not in {"fifo_queue", "priority_resolver", "invalid_collision"}:
             raise ValueError("unsupported technician conflict semantics")
 
@@ -83,27 +94,45 @@ class PassiveTechnicianEnv:
             queues=tuple(tuple() for _ in range(self.config.technicians)),
         )
 
-    def reset(self) -> tuple[int, ...]:
+    def reset(self) -> tuple[tuple[int, ...], ...]:
         self.time = 0
         self.state = self.initial_state()
         self.metrics = {"objective": 0.0, "failures": 0, "jobs": 0, "collisions": 0, "waiting": 0}
         return self.observations()
 
-    def observations(self) -> tuple[int, ...]:
-        # Local observation: age, failure flag, and technician availability mask.
-        available = sum(
-            int(until <= self.time) << technician
-            for technician, until in enumerate(self.state.busy_until)
-        )
-        return tuple(
-            int(self.state.ages[machine])
-            + self.config.max_age * int(self.state.failed[machine])
-            + (self.config.max_age + 1) * 2 * available
-            + (self.config.max_age + 1) * 2 * self.config.technicians * int(
-                any(machine in queue for queue in self.state.queues)
-            )
-            for machine in range(self.config.machines)
-        )
+    @property
+    def observation_dim(self) -> int:
+        """Dimension of one machine's local resource-aware observation."""
+        return self.config.observation_dim
+
+    def observations(self) -> tuple[tuple[int, ...], ...]:
+        """Return structured local observations for all machine agents.
+
+        Each machine sees its time, age, failure state, and per-technician
+        availability, remaining busy time, self-assignment, queue length,
+        queue position, and fixed service time. The service-time row is part of
+        the observation so technician selection is an observable decision.
+        """
+        observations: list[tuple[int, ...]] = []
+        for machine in range(self.config.machines):
+            features = [self.time, self.state.ages[machine], int(self.state.failed[machine])]
+            for technician in range(self.config.technicians):
+                queue = self.state.queues[technician]
+                position = queue.index(machine) + 1 if machine in queue else 0
+                service_time = self.config.service_time[machine][technician]
+                service_value = -1 if not math.isfinite(service_time) else int(service_time)
+                features.extend(
+                    [
+                        int(self.available(technician)),
+                        max(0, self.state.busy_until[technician] - self.time),
+                        int(self.state.assigned_machine[technician] == machine),
+                        len(queue),
+                        position,
+                        service_value,
+                    ]
+                )
+            observations.append(tuple(features))
+        return tuple(observations)
 
     def available(self, technician: int) -> bool:
         return self.state.busy_until[technician] <= self.time
@@ -154,6 +183,7 @@ class PassiveTechnicianEnv:
         objective = 0.0
         failures = 0
         jobs = 0
+        objective += cfg.queue_waiting_cost * waiting
         # Cost for the state before service starts.
         for machine in range(cfg.machines):
             if failed[machine]:
@@ -269,18 +299,25 @@ class IndependentQ:
     def __init__(self, config: PassiveConfig, seed: int, alpha: float = 0.2, gamma: float = 0.95):
         self.config, self.rng = config, random.Random(seed)
         self.alpha, self.gamma = alpha, gamma
-        self.q: list[dict[tuple[int, int], float]] = [dict() for _ in range(config.machines)]
+        self.q: list[dict[tuple[tuple[int, ...], int], float]] = [dict() for _ in range(config.machines)]
 
-    def _key(self, obs: int, action: int) -> tuple[int, int]:
+    def _key(self, obs: tuple[int, ...], action: int) -> tuple[tuple[int, ...], int]:
         return obs, action
 
-    def action(self, machine: int, obs: int, epsilon: float) -> int:
+    def action(self, machine: int, obs: tuple[int, ...], epsilon: float) -> int:
         values = [self.q[machine].get(self._key(obs, action), 0.0) for action in range(self.config.technicians + 1)]
         if self.rng.random() < epsilon:
             return self.rng.randrange(self.config.technicians + 1)
         return min(range(len(values)), key=lambda action: values[action])
 
-    def update(self, machine: int, obs: int, action: int, cost: float, next_obs: int) -> None:
+    def update(
+        self,
+        machine: int,
+        obs: tuple[int, ...],
+        action: int,
+        cost: float,
+        next_obs: tuple[int, ...],
+    ) -> None:
         old = self.q[machine].get(self._key(obs, action), 0.0)
         future = min(self.q[machine].get(self._key(next_obs, a), 0.0) for a in range(self.config.technicians + 1))
         self.q[machine][self._key(obs, action)] = old + self.alpha * (cost + self.gamma * future - old)
@@ -291,7 +328,10 @@ class IndependentQ:
             "gamma": self.gamma,
             "machines": self.config.machines,
             "technicians": self.config.technicians,
-            "q": [{f"{obs}:{action}": value for (obs, action), value in table.items()} for table in self.q],
+            "q": [
+                {json.dumps([list(obs), action]): value for (obs, action), value in table.items()}
+                for table in self.q
+            ],
         }
         path.write_text(json.dumps(payload, sort_keys=True) + "\n")
 
@@ -300,7 +340,11 @@ class IndependentQ:
         payload = json.loads(path.read_text())
         learner = cls(config, seed, alpha=float(payload["alpha"]), gamma=float(payload["gamma"]))
         learner.q = [
-            {tuple(map(int, key.split(":"))): float(value) for key, value in table.items()}
+            {
+                (tuple(item[0]), int(item[1])): float(value)
+                for key, value in table.items()
+                for item in [json.loads(key)]
+            }
             for table in payload["q"]
         ]
         return learner
@@ -317,7 +361,7 @@ def train_independent(config: PassiveConfig, seed: int, episodes: int) -> Indepe
             actions = tuple(learner.action(m, obs[m], epsilon) for m in range(config.machines))
             next_obs, reward, done, info = env.step(actions)
             for machine in range(config.machines):
-                learner.update(machine, obs[machine], actions[machine], -reward + info["collisions"] * config.collision_cost, next_obs[machine])
+                learner.update(machine, obs[machine], actions[machine], -reward, next_obs[machine])
             obs = next_obs
     return learner
 

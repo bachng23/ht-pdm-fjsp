@@ -22,6 +22,8 @@ from ht_pdm_fjsp.passive_technician_marl import (
     IndependentQ,
     PassiveConfig,
     PassiveTechnicianEnv,
+    OBJECTIVE_VERSION,
+    OBSERVATION_VERSION,
     dispatcher_action,
     exact_optimum,
     evaluate_marl,
@@ -102,8 +104,23 @@ class PPOSettings:
     update_epochs: int = 4
 
 
-def _obs_tensor(observations: tuple[int, ...]) -> torch.Tensor:
-    return torch.tensor(observations, dtype=torch.float32).unsqueeze(-1) / 100.0
+def _obs_tensor(
+    observations: tuple[tuple[int, ...], ...],
+    config: PassiveConfig,
+) -> torch.Tensor:
+    finite_service_times = [
+        service_time
+        for row in config.service_time
+        for service_time in row
+        if np.isfinite(service_time)
+    ]
+    scale = max(
+        1,
+        config.max_age,
+        config.horizon,
+        max(finite_service_times, default=1),
+    )
+    return torch.tensor(observations, dtype=torch.float32) / float(scale)
 
 
 def _returns(rewards: list[float], gamma: float) -> torch.Tensor:
@@ -118,7 +135,10 @@ def _returns(rewards: list[float], gamma: float) -> torch.Tensor:
 def train_independent_ppo(config: PassiveConfig, seed: int, settings: PPOSettings, output: Path) -> Path:
     torch.manual_seed(seed)
     random.seed(seed)
-    policies = [ActorCritic(1, config.technicians + 1) for _ in range(config.machines)]
+    policies = [
+        ActorCritic(config.observation_dim, config.technicians + 1)
+        for _ in range(config.machines)
+    ]
     optimizers = [torch.optim.Adam(policy.parameters(), lr=settings.learning_rate) for policy in policies]
     progress: list[dict[str, float | int]] = []
     for episode in tqdm(range(settings.episodes), desc=f"Independent PPO {seed}", unit="episode", leave=False):
@@ -130,7 +150,7 @@ def train_independent_ppo(config: PassiveConfig, seed: int, settings: PPOSetting
         rewards: list[float] = []
         done = False
         while not done:
-            obs = _obs_tensor(observations)
+            obs = _obs_tensor(observations, config)
             actions: list[int] = []
             for machine, policy in enumerate(policies):
                 logits, value = policy(obs[machine : machine + 1])
@@ -173,7 +193,10 @@ def train_independent_ppo(config: PassiveConfig, seed: int, settings: PPOSetting
 
 def load_independent_ppo(config: PassiveConfig, path: Path) -> list[ActorCritic]:
     payload = torch.load(path, map_location="cpu", weights_only=True)
-    policies = [ActorCritic(1, config.technicians + 1) for _ in range(config.machines)]
+    policies = [
+        ActorCritic(config.observation_dim, config.technicians + 1)
+        for _ in range(config.machines)
+    ]
     for policy, state in zip(policies, payload["policies"]):
         policy.load_state_dict(state)
         policy.eval()
@@ -185,7 +208,7 @@ def evaluate_independent_ppo(config: PassiveConfig, policies: list[ActorCritic],
     observations = env.reset()
     done = False
     while not done:
-        obs = _obs_tensor(observations)
+        obs = _obs_tensor(observations, config)
         actions = []
         with torch.no_grad():
             for machine, policy in enumerate(policies):
@@ -196,12 +219,18 @@ def evaluate_independent_ppo(config: PassiveConfig, policies: list[ActorCritic],
 
 
 class CentralizedPPO(nn.Module):
-    def __init__(self, machines: int, action_dim: int) -> None:
+    def __init__(self, machines: int, observation_dim: int, action_dim: int) -> None:
         super().__init__()
-        self.body = nn.Sequential(nn.Linear(machines, 96), nn.Tanh(), nn.Linear(96, 96), nn.Tanh())
+        self.body = nn.Sequential(
+            nn.Linear(machines * observation_dim, 96),
+            nn.Tanh(),
+            nn.Linear(96, 96),
+            nn.Tanh(),
+        )
         self.policy = nn.Linear(96, machines * action_dim)
         self.value = nn.Linear(96, 1)
         self.machines = machines
+        self.observation_dim = observation_dim
         self.action_dim = action_dim
 
     def forward(self, observations: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -212,7 +241,7 @@ class CentralizedPPO(nn.Module):
 def train_centralized_ppo(config: PassiveConfig, seed: int, settings: PPOSettings, output: Path) -> Path:
     torch.manual_seed(seed)
     random.seed(seed)
-    policy = CentralizedPPO(config.machines, config.technicians + 1)
+    policy = CentralizedPPO(config.machines, config.observation_dim, config.technicians + 1)
     optimizer = torch.optim.Adam(policy.parameters(), lr=settings.learning_rate)
     progress: list[dict[str, float | int]] = []
     for episode in tqdm(range(settings.episodes), desc=f"Centralized PPO {seed}", unit="episode", leave=False):
@@ -224,10 +253,10 @@ def train_centralized_ppo(config: PassiveConfig, seed: int, settings: PPOSetting
         rewards: list[float] = []
         done = False
         while not done:
-            logits, value = policy(_obs_tensor(observations).flatten().unsqueeze(0))
+            logits, value = policy(_obs_tensor(observations, config).flatten().unsqueeze(0))
             distributions = [Categorical(logits=logits[0, machine]) for machine in range(config.machines)]
             actions = [int(distribution.sample().item()) for distribution in distributions]
-            rollout_obs.append(_obs_tensor(observations).flatten().detach())
+            rollout_obs.append(_obs_tensor(observations, config).flatten().detach())
             rollout_actions.append(torch.tensor(actions, dtype=torch.long))
             old_log_probs.append(torch.stack([distribution.log_prob(torch.tensor(action)) for distribution, action in zip(distributions, actions)]).detach().sum())
             observations, reward, done, _ = env.step(actions)
@@ -266,7 +295,7 @@ def train_centralized_ppo(config: PassiveConfig, seed: int, settings: PPOSetting
 
 def load_centralized_ppo(config: PassiveConfig, path: Path) -> CentralizedPPO:
     payload = torch.load(path, map_location="cpu", weights_only=True)
-    policy = CentralizedPPO(config.machines, config.technicians + 1)
+    policy = CentralizedPPO(config.machines, config.observation_dim, config.technicians + 1)
     policy.load_state_dict(payload["policy"])
     policy.eval()
     return policy
@@ -278,7 +307,7 @@ def evaluate_centralized_ppo(config: PassiveConfig, policy: CentralizedPPO, seed
     done = False
     while not done:
         with torch.no_grad():
-            logits, _ = policy(_obs_tensor(observations).flatten().unsqueeze(0))
+            logits, _ = policy(_obs_tensor(observations, config).flatten().unsqueeze(0))
             actions = [int(torch.argmax(logits[0, machine]).item()) for machine in range(config.machines)]
         observations, _, done, _ = env.step(actions)
     return {"policy": "centralized_ppo", "seed": seed, "train_seed": train_seed, **env.metrics}
@@ -318,11 +347,26 @@ def run(args: argparse.Namespace) -> Path:
         "train_seeds": list(train_seeds),
         "evaluation_seeds": list(evaluation_seeds),
         "settings": asdict(settings),
+        "objective_version": OBJECTIVE_VERSION,
+        "observation_version": OBSERVATION_VERSION,
         "sealed_test_evaluated": False,
         "started_at": datetime.now(UTC).isoformat(),
     }
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    (output / "benchmark_config.json").write_text(json.dumps({"stress_config": asdict(config), "oracle_config": asdict(oracle), "settings": asdict(settings)}, indent=2, sort_keys=True) + "\n")
+    (output / "benchmark_config.json").write_text(
+        json.dumps(
+            {
+                "stress_config": asdict(config),
+                "oracle_config": asdict(oracle),
+                "settings": asdict(settings),
+                "objective_version": OBJECTIVE_VERSION,
+                "observation_version": OBSERVATION_VERSION,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
     exact = exact_optimum(oracle)
     rows: list[dict[str, Any]] = []
     fixed_rows = [evaluate_fixed(config, policy, seed) for policy in ("random_feasible", "skill_aware_fifo") for seed in tqdm(evaluation_seeds, desc=policy, unit="episode")]

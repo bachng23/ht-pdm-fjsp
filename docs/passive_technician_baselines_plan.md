@@ -3,7 +3,12 @@
 The main stress cell has three machines and two heterogeneous passive
 technicians with FIFO queues. The exact expected dynamic program uses a
 two-machine, two-technician, six-step cell with the same transition code. The
-fixed baselines are random feasible and skill-aware FIFO dispatch. Learned
+locked objective includes a queue-waiting cost of 0.5 per queued request-step,
+and every learner receives the exact environment cost without an
+algorithm-specific collision surcharge. Local observations include technician
+availability, remaining busy time, queue position, and machine-technician
+service time. The fixed baselines are random feasible and skill-aware FIFO
+dispatch. Learned
 baselines are tabular independent Q-learning, independent PPO (the
 Rodríguez-style mechanism baseline), and centralized PPO as a coordination
 upper bound.
