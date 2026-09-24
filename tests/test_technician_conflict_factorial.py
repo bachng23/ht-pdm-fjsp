@@ -55,6 +55,19 @@ def test_both_assignment_policies_complete_and_pass_feasibility_audit() -> None:
     assert results["conflict_aware_matcher"]["technician_conflicts"] == 0
 
 
+def test_final_corrective_repair_completes_after_all_jobs_finish() -> None:
+    base = BenchmarkConfig.from_json(CONFIG_PATH)
+    spec = FactorSpec(True, True, True, True, False)
+    config = build_condition_config(base, spec)
+    episode = LiteratureFactorialSimulator(
+        config, spec, "independent_greedy"
+    ).run(seed=62_913)[0]
+    assert episode["failures"] == 1
+    assert episode["corrective_maintenance"] == 1
+    assert episode["feasibility_audit_passed"] == 1
+    assert episode["invalid_executions"] == 0
+
+
 def test_smoke_run_writes_complete_factorial_artifacts(tmp_path: Path) -> None:
     output = tmp_path / "technician_factorial_smoke_20260924T000000Z"
     run(

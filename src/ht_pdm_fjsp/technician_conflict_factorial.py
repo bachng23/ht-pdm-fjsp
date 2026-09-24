@@ -456,14 +456,18 @@ class LiteratureFactorialSimulator:
             return MaintenanceDemand(machine_id, "preventive", now)
 
         def current_demands() -> list[MaintenanceDemand]:
-            if all_jobs_complete():
-                pending.clear()
-                return []
+            production_complete = all_jobs_complete()
+            if production_complete:
+                for machine_id in tuple(pending):
+                    if machines[machine_id].status != "waiting_corrective":
+                        pending.pop(machine_id, None)
             output: list[MaintenanceDemand] = []
             for machine_id in sorted(machines):
                 state = machines[machine_id]
                 if state.status == "waiting_corrective":
                     demand = pending.get(machine_id) or MaintenanceDemand(machine_id, "corrective", now)
+                elif production_complete:
+                    demand = None
                 elif state.status == "idle" and state.effective_age > 0.0:
                     demand = pending.get(machine_id)
                     if demand is None:

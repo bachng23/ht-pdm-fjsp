@@ -122,3 +122,19 @@ release schedules.  It may nominate one probability for a separately registered
 confirmation panel and later MARL training.  It does not show that any learned
 algorithm can exploit the coordination opportunity, and results do not
 generalize to schedules or mixture mechanisms outside this grid.
+
+## Implementation correction after the first aborted full invocation
+
+The first lab invocation stopped at seed 62913 before completing its first
+condition.  A final production completion and a machine failure occurred before
+the same event frontier ended, leaving that machine in `waiting_corrective`
+after every job had completed.  The shared simulator incorrectly suppressed all
+maintenance demands once production was complete while its terminal condition
+still required every machine to become idle.  This created a deadlock instead of
+executing the outstanding corrective repair.
+
+The correction preserves corrective demand and executes the final repair while
+discarding obsolete preventive demand after production completion.  A regression
+test locks seed 62913.  No probability, metric, gate, seed panel, stopping rule,
+or selection rule changed.  The incomplete artifact remains failure evidence;
+the corrected full invocation must use a new timestamped directory.
