@@ -7,6 +7,26 @@ maintenance, and heterogeneous technician assignment.
 The model is deliberately minimal. It is a simulator validation target, not a
 claim that the synthetic parameters represent a specific factory.
 
+## Parallel-machine maintenance benchmark
+
+The repository also contains a simulator-first benchmark that removes job
+routing and precedence entirely. Six parallel machines produce at fixed rates,
+degrade under conditional Weibull hazards, and share two technicians whose
+skills, stochastic service times, absence, repair success, and experience evolve
+over time. The first experiment screens fixed heuristics, masked centralized
+PPO, IQL, and QMIX without opening the sealed test panel:
+
+```bash
+uv run ht-pdm-fjsp-parallel-maintenance \
+  --config configs/parallel_maintenance.json \
+  --profile smoke \
+  --device cpu \
+  --output-dir "artifacts/parallel_maintenance_smoke_$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+See `docs/parallel_maintenance_baseline_scan_plan.md` for the locked hypotheses,
+metrics, seed panels, stopping rule, audit gate, and artifact contract.
+
 ## Setup
 
 ```bash

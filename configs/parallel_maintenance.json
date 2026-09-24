@@ -1,0 +1,51 @@
+{
+  "horizon": 168,
+  "time_step": 1.0,
+  "machines": [
+    {"machine_id": "M1", "failure_type": 0, "production_rate": 1.20, "load": 0.90, "age_rate": 1.00, "weibull_shape": 2.4, "weibull_scale": 72.0},
+    {"machine_id": "M2", "failure_type": 1, "production_rate": 1.00, "load": 0.85, "age_rate": 1.10, "weibull_shape": 2.8, "weibull_scale": 80.0},
+    {"machine_id": "M3", "failure_type": 2, "production_rate": 1.35, "load": 0.95, "age_rate": 0.95, "weibull_shape": 2.2, "weibull_scale": 68.0},
+    {"machine_id": "M4", "failure_type": 0, "production_rate": 0.90, "load": 0.80, "age_rate": 1.20, "weibull_shape": 3.0, "weibull_scale": 88.0},
+    {"machine_id": "M5", "failure_type": 1, "production_rate": 1.10, "load": 0.90, "age_rate": 1.05, "weibull_shape": 2.6, "weibull_scale": 76.0},
+    {"machine_id": "M6", "failure_type": 2, "production_rate": 1.25, "load": 0.88, "age_rate": 1.15, "weibull_shape": 2.5, "weibull_scale": 74.0}
+  ],
+  "technicians": [
+    {
+      "technician_id": "T1",
+      "base_skill": [0.90, 0.55, 0.35],
+      "base_duration": [3.0, 5.0, 7.0],
+      "duration_sigma": [0.15, 0.25, 0.35],
+      "learning_rate": 0.08,
+      "absence_probability": 0.04
+    },
+    {
+      "technician_id": "T2",
+      "base_skill": [0.40, 0.70, 0.88],
+      "base_duration": [6.5, 4.5, 3.2],
+      "duration_sigma": [0.35, 0.25, 0.15],
+      "learning_rate": 0.06,
+      "absence_probability": 0.05
+    }
+  ],
+  "maintenance": {
+    "pm_duration_factor": 0.65,
+    "pm_restoration": 0.75,
+    "cm_restoration": 1.0,
+    "experience_duration_gain": 0.45,
+    "success_intercept": -0.20,
+    "success_skill_weight": 3.0,
+    "success_experience_weight": 1.2,
+    "pm_risk_threshold": 0.02
+  },
+  "costs": {
+    "downtime": 2.0,
+    "failure": 18.0,
+    "preventive": 3.0,
+    "corrective": 8.0,
+    "waiting": 0.75,
+    "conflict": 1.5,
+    "rework": 12.0,
+    "early_pm": 5.0,
+    "production_credit": 1.0
+  }
+}

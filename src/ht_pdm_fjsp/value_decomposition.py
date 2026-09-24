@@ -9,7 +9,7 @@ import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import torch as th
@@ -262,7 +262,7 @@ def _stack_observations(
 
 
 def train_value_policy(
-    config: BenchmarkConfig,
+    config: BenchmarkConfig | Any,
     settings: ValueLearningSettings,
     output_dir: Path,
     *,
@@ -270,6 +270,7 @@ def train_value_policy(
     train_seed: int,
     show_progress: bool,
     checkpoint_targets: tuple[int, ...] | None = None,
+    env_factory: Callable[[], Any] | None = None,
 ) -> tuple[ValueDecompositionPolicy, float]:
     if settings.n_envs < 1:
         raise ValueError("n_envs must be positive")
@@ -279,7 +280,9 @@ def train_value_policy(
     th.manual_seed(train_seed)
     rng = np.random.default_rng(train_seed)
     envs = [
-        MachineAgentsCTDEEnv(config, wait_policy="safe_noop")
+        env_factory()
+        if env_factory is not None
+        else MachineAgentsCTDEEnv(config, wait_policy="safe_noop")
         for _ in range(settings.n_envs)
     ]
     observations = [
