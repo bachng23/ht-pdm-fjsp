@@ -87,6 +87,14 @@ def _profile(profile: str) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int,
     raise ValueError(f"Unknown profile: {profile}")
 
 
+def resolve_device(requested: str) -> torch.device:
+    if requested == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if requested == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("--device cuda requested, but torch.cuda.is_available() is false")
+    return torch.device(requested)
+
+
 def _save_q_checkpoint(learner: IndependentQ, root: Path, budget: int) -> Path:
     path = root / f"budget_{budget}" / "model.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -148,10 +156,11 @@ def _train_independent_ppo_checkpoints(
     budgets: tuple[int, ...],
     root: Path,
     settings: PPOSettings,
+    device: torch.device,
 ) -> tuple[dict[int, Path], list[dict[str, Any]]]:
     torch.manual_seed(seed)
     random.seed(seed)
-    policies = [ActorCritic(config.observation_dim, config.technicians + 1) for _ in range(config.machines)]
+    policies = [ActorCritic(config.observation_dim, config.technicians + 1).to(device) for _ in range(config.machines)]
     optimizers = [torch.optim.Adam(policy.parameters(), lr=settings.learning_rate) for policy in policies]
     checkpoints: dict[int, Path] = {}
     progress: list[dict[str, Any]] = []
@@ -167,7 +176,7 @@ def _train_independent_ppo_checkpoints(
         rewards: list[float] = []
         done = False
         while not done:
-            obs = _obs_tensor(observations, config)
+            obs = _obs_tensor(observations, config).to(device)
             actions: list[int] = []
             for machine, policy in enumerate(policies):
                 logits, _ = policy(obs[machine : machine + 1])
@@ -179,7 +188,7 @@ def _train_independent_ppo_checkpoints(
                 old_log_probs[machine].append(distribution.log_prob(action).detach().squeeze(0))
             observations, reward, done, _ = env.step(actions)
             rewards.append(float(reward))
-        returns = _returns(rewards, settings.gamma)
+        returns = _returns(rewards, settings.gamma).to(device)
         for machine, policy in enumerate(policies):
             observations_tensor = torch.stack(rollout_obs[machine])
             actions_tensor = torch.stack(rollout_actions[machine])
@@ -223,10 +232,11 @@ def _train_centralized_ppo_checkpoints(
     budgets: tuple[int, ...],
     root: Path,
     settings: PPOSettings,
+    device: torch.device,
 ) -> tuple[dict[int, Path], list[dict[str, Any]]]:
     torch.manual_seed(seed)
     random.seed(seed)
-    policy = CentralizedPPO(config.machines, config.observation_dim, config.technicians + 1)
+    policy = CentralizedPPO(config.machines, config.observation_dim, config.technicians + 1).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=settings.learning_rate)
     checkpoints: dict[int, Path] = {}
     progress: list[dict[str, Any]] = []
@@ -242,15 +252,15 @@ def _train_centralized_ppo_checkpoints(
         rewards: list[float] = []
         done = False
         while not done:
-            flattened = _obs_tensor(observations, config).flatten().unsqueeze(0)
+            flattened = _obs_tensor(observations, config).flatten().unsqueeze(0).to(device)
             logits, _ = policy(flattened)
             distributions = [Categorical(logits=logits[0, machine]) for machine in range(config.machines)]
             actions = [int(distribution.sample().item()) for distribution in distributions]
             rollout_obs.append(flattened.squeeze(0).detach())
-            rollout_actions.append(torch.tensor(actions, dtype=torch.long))
+            rollout_actions.append(torch.tensor(actions, dtype=torch.long, device=device))
             old_log_probs.append(
                 torch.stack(
-                    [distribution.log_prob(torch.tensor(action)) for distribution, action in zip(distributions, actions)]
+                    [distribution.log_prob(torch.tensor(action, device=device)) for distribution, action in zip(distributions, actions)]
                 ).sum().detach()
             )
             observations, reward, done, _ = env.step(actions)
@@ -364,6 +374,7 @@ def _summary(rows: list[dict[str, Any]], train_seeds: tuple[int, ...], eval_seed
 def run(args: argparse.Namespace) -> Path:
     train_seeds, evaluation_seeds, budgets = _profile(args.profile)
     config = stress_config()
+    device = resolve_device(args.device)
     settings = PPOSettings(episodes=max(budgets))
     output = Path(args.output_dir).resolve()
     if output.exists() and any(output.iterdir()):
@@ -383,7 +394,7 @@ def run(args: argparse.Namespace) -> Path:
         "objective_version": OBJECTIVE_VERSION,
         "observation_version": OBSERVATION_VERSION,
         "requested_device": args.device,
-        "resolved_device": "cpu",
+        "resolved_device": str(device),
         "git_revision": _git_revision(),
         "python": platform.python_version(),
         "started_at": datetime.now(UTC).isoformat(),
@@ -406,9 +417,9 @@ def run(args: argparse.Namespace) -> Path:
             if algorithm == "independent_q":
                 checkpoints, training_rows = _train_q_checkpoints(config, train_seed, budgets, root)
             elif algorithm == "independent_ppo":
-                checkpoints, training_rows = _train_independent_ppo_checkpoints(config, train_seed, budgets, root, settings)
+                checkpoints, training_rows = _train_independent_ppo_checkpoints(config, train_seed, budgets, root, settings, device)
             else:
-                checkpoints, training_rows = _train_centralized_ppo_checkpoints(config, train_seed, budgets, root, settings)
+                checkpoints, training_rows = _train_centralized_ppo_checkpoints(config, train_seed, budgets, root, settings, device)
             progress.extend(training_rows)
             for budget in budgets:
                 checkpoint = checkpoints[budget]
@@ -416,16 +427,18 @@ def run(args: argparse.Namespace) -> Path:
                     policy = IndependentQ.load(checkpoint, config, seed=train_seed)
                 elif algorithm == "independent_ppo":
                     policy = load_independent_ppo(config, checkpoint)
+                    policy = [item.to(device) for item in policy]
                 else:
                     policy = load_centralized_ppo(config, checkpoint)
+                    policy = policy.to(device)
                 for seed in tqdm(evaluation_seeds, desc=f"evaluate {algorithm}/{train_seed}/{budget}", unit="episode", leave=False):
                     if algorithm == "independent_q":
                         evaluated = dict(_evaluate_q(config, policy, seed, train_seed))
                         evaluated["policy"] = algorithm
                     elif algorithm == "independent_ppo":
-                        evaluated = evaluate_independent_ppo(config, policy, seed, train_seed)
+                        evaluated = _evaluate_independent_ppo(config, policy, seed, train_seed, device)
                     else:
-                        evaluated = evaluate_centralized_ppo(config, policy, seed, train_seed)
+                        evaluated = _evaluate_centralized_ppo(config, policy, seed, train_seed, device)
                     rows.append(_with_budget(evaluated, budget, train_seed))
                 _write_csv(rows, output / "episodes.partial.csv", FIELDNAMES)
     _write_csv(rows, output / "episodes.csv", FIELDNAMES)
@@ -459,10 +472,46 @@ def _evaluate_q(config: PassiveConfig, learner: IndependentQ, seed: int, train_s
     return {"policy": "independent_q", "seed": seed, "train_seed": train_seed, **env.metrics}
 
 
+def _evaluate_independent_ppo(
+    config: PassiveConfig,
+    policies: list[ActorCritic],
+    seed: int,
+    train_seed: int,
+    device: torch.device,
+) -> dict[str, Any]:
+    env = PassiveTechnicianEnv(config, seed=seed)
+    observations = env.reset()
+    done = False
+    while not done:
+        obs = _obs_tensor(observations, config).to(device)
+        with torch.no_grad():
+            actions = [int(torch.argmax(policy(obs[machine : machine + 1])[0], dim=-1).item()) for machine, policy in enumerate(policies)]
+        observations, _, done, _ = env.step(actions)
+    return {"policy": "independent_ppo", "seed": seed, "train_seed": train_seed, **env.metrics}
+
+
+def _evaluate_centralized_ppo(
+    config: PassiveConfig,
+    policy: CentralizedPPO,
+    seed: int,
+    train_seed: int,
+    device: torch.device,
+) -> dict[str, Any]:
+    env = PassiveTechnicianEnv(config, seed=seed)
+    observations = env.reset()
+    done = False
+    while not done:
+        with torch.no_grad():
+            logits, _ = policy(_obs_tensor(observations, config).flatten().unsqueeze(0).to(device))
+            actions = [int(torch.argmax(logits[0, machine]).item()) for machine in range(config.machines)]
+        observations, _, done, _ = env.step(actions)
+    return {"policy": "centralized_ppo", "seed": seed, "train_seed": train_seed, **env.metrics}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", choices=("smoke", "pilot", "full"), required=True)
-    parser.add_argument("--device", choices=("cpu", "auto"), default="cpu")
+    parser.add_argument("--device", choices=("cpu", "cuda", "auto"), default="cpu")
     parser.add_argument("--output-dir", required=True)
     return parser
 
