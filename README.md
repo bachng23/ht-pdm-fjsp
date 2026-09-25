@@ -202,3 +202,18 @@ uv run ht-pdm-fjsp-marl-factorial \
 
 See `docs/marl_factorial_followup_plan.md` for the locked factorial and capacity
 contrasts.
+
+The confirmatory passive-technician experiment trains four locked value-
+decomposition variants with ten paired training seeds and evaluates each
+checkpoint on four reporting scenarios:
+
+```bash
+uv run ht-pdm-fjsp-passive-confirmatory \
+  --profile smoke \
+  --device cpu \
+  --output-dir artifacts/passive_technician_confirmatory_smoke
+```
+
+Its prespecified hypothesis, seed panels, stopping rule, statistical unit, and
+artifact contract are documented in
+`docs/passive_technician_confirmatory_plan.md`.

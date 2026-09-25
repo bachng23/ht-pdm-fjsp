@@ -62,7 +62,12 @@ def random_feasible_action(env: PassiveTechnicianEnv) -> tuple[int, ...]:
     available = [technician for technician in range(env.config.technicians) if env.available(technician)]
     env.rng.shuffle(available)
     actions = [0] * env.config.machines
-    for machine in env.rng.sample(range(env.config.machines), env.config.machines):
+    eligible_machines = [
+        machine
+        for machine in range(env.config.machines)
+        if any(env.action_mask(machine)[1:])
+    ]
+    for machine in env.rng.sample(eligible_machines, len(eligible_machines)):
         if not available:
             break
         if env.state.failed[machine] or env.state.ages[machine] >= env.config.failure_age - 1:

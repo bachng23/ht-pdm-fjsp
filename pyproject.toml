@@ -69,6 +69,7 @@ ht-pdm-fjsp-passive-algorithm-screen = "ht_pdm_fjsp.passive_technician_algorithm
 ht-pdm-fjsp-passive-counterfactual = "ht_pdm_fjsp.passive_technician_counterfactual:main"
 ht-pdm-fjsp-passive-long-comparison = "ht_pdm_fjsp.passive_technician_long_comparison:main"
 ht-pdm-fjsp-passive-ablation = "ht_pdm_fjsp.passive_technician_ablation:main"
+ht-pdm-fjsp-passive-confirmatory = "ht_pdm_fjsp.passive_technician_confirmatory:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
