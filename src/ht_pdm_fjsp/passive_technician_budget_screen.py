@@ -25,6 +25,7 @@ from ht_pdm_fjsp.passive_technician_baselines import (
     CentralizedPPO,
     PPOSettings,
     _obs_tensor,
+    _masked_logits,
     _returns,
     evaluate_centralized_ppo,
     evaluate_fixed,
@@ -55,6 +56,8 @@ FIELDNAMES = (
     "jobs",
     "collisions",
     "waiting",
+    "invalid_requests",
+    "busy_requests",
 )
 
 
@@ -84,6 +87,8 @@ def _profile(profile: str) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int,
         return (11, 12, 13), tuple(range(101, 111)), (100, 200, 400)
     if profile == "full":
         return (11, 12, 13), tuple(range(101, 201)), BUDGETS
+    if profile == "replication":
+        return tuple(range(14, 24)), tuple(range(101, 201)), BUDGETS
     raise ValueError(f"Unknown profile: {profile}")
 
 
@@ -121,11 +126,13 @@ def _train_q_checkpoints(
         done = False
         epsilon = max(0.05, 1.0 - (episode - 1) / max(1, max(budgets) * 0.8))
         while not done:
+            masks = env.action_masks()
             actions = tuple(
-                learner.action(machine, observations[machine], epsilon)
+                learner.action(machine, observations[machine], epsilon, masks[machine])
                 for machine in range(config.machines)
             )
             next_observations, reward, done, _ = env.step(actions)
+            next_masks = env.action_masks()
             for machine in range(config.machines):
                 learner.update(
                     machine,
@@ -133,6 +140,7 @@ def _train_q_checkpoints(
                     actions[machine],
                     -reward,
                     next_observations[machine],
+                    next_masks[machine],
                 )
             observations = next_observations
             rewards.append(float(reward))
@@ -173,19 +181,22 @@ def _train_independent_ppo_checkpoints(
         rollout_obs: list[list[torch.Tensor]] = [[] for _ in policies]
         rollout_actions: list[list[torch.Tensor]] = [[] for _ in policies]
         old_log_probs: list[list[torch.Tensor]] = [[] for _ in policies]
+        rollout_masks: list[list[torch.Tensor]] = [[] for _ in policies]
         rewards: list[float] = []
         done = False
         while not done:
             obs = _obs_tensor(observations, config).to(device)
+            masks = env.action_masks()
             actions: list[int] = []
             for machine, policy in enumerate(policies):
                 logits, _ = policy(obs[machine : machine + 1])
-                distribution = Categorical(logits=logits)
+                distribution = Categorical(logits=_masked_logits(logits, masks[machine]))
                 action = distribution.sample()
                 actions.append(int(action.item()))
                 rollout_obs[machine].append(obs[machine].detach())
                 rollout_actions[machine].append(action.detach().squeeze(0))
                 old_log_probs[machine].append(distribution.log_prob(action).detach().squeeze(0))
+                rollout_masks[machine].append(torch.tensor(masks[machine], dtype=torch.bool, device=device))
             observations, reward, done, _ = env.step(actions)
             rewards.append(float(reward))
         returns = _returns(rewards, settings.gamma, device=device)
@@ -193,13 +204,14 @@ def _train_independent_ppo_checkpoints(
             observations_tensor = torch.stack(rollout_obs[machine])
             actions_tensor = torch.stack(rollout_actions[machine])
             old_log_probs_tensor = torch.stack(old_log_probs[machine])
+            masks_tensor = torch.stack(rollout_masks[machine])
             with torch.no_grad():
                 _, old_values = policy(observations_tensor)
                 advantages = returns - old_values
                 advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
             for _ in range(settings.update_epochs):
                 logits, values_tensor = policy(observations_tensor)
-                distribution = Categorical(logits=logits)
+                distribution = Categorical(logits=_masked_logits(logits, masks_tensor))
                 log_probs_tensor = distribution.log_prob(actions_tensor)
                 ratio = torch.exp(log_probs_tensor - old_log_probs_tensor)
                 clipped = torch.clamp(ratio, 1.0 - settings.clip_ratio, 1.0 + settings.clip_ratio)
@@ -249,15 +261,21 @@ def _train_centralized_ppo_checkpoints(
         rollout_obs: list[torch.Tensor] = []
         rollout_actions: list[torch.Tensor] = []
         old_log_probs: list[torch.Tensor] = []
+        rollout_masks: list[torch.Tensor] = []
         rewards: list[float] = []
         done = False
         while not done:
             flattened = _obs_tensor(observations, config).flatten().unsqueeze(0).to(device)
             logits, _ = policy(flattened)
-            distributions = [Categorical(logits=logits[0, machine]) for machine in range(config.machines)]
+            masks = env.action_masks()
+            distributions = [
+                Categorical(logits=_masked_logits(logits[0, machine], masks[machine]))
+                for machine in range(config.machines)
+            ]
             actions = [int(distribution.sample().item()) for distribution in distributions]
             rollout_obs.append(flattened.squeeze(0).detach())
             rollout_actions.append(torch.tensor(actions, dtype=torch.long, device=device))
+            rollout_masks.append(torch.tensor(masks, dtype=torch.bool, device=device))
             old_log_probs.append(
                 torch.stack(
                     [distribution.log_prob(torch.tensor(action, device=device)) for distribution, action in zip(distributions, actions)]
@@ -269,13 +287,17 @@ def _train_centralized_ppo_checkpoints(
         observations_tensor = torch.stack(rollout_obs)
         actions_tensor = torch.stack(rollout_actions)
         old_log_probs_tensor = torch.stack(old_log_probs)
+        masks_tensor = torch.stack(rollout_masks)
         with torch.no_grad():
             _, old_values = policy(observations_tensor)
             advantages = returns - old_values
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         for _ in range(settings.update_epochs):
             logits, values_tensor = policy(observations_tensor)
-            distributions = [Categorical(logits=logits[:, machine]) for machine in range(config.machines)]
+            distributions = [
+                Categorical(logits=_masked_logits(logits[:, machine], masks_tensor[:, machine]))
+                for machine in range(config.machines)
+            ]
             log_probs_tensor = torch.stack(
                 [distribution.log_prob(actions_tensor[:, machine]) for machine, distribution in enumerate(distributions)], dim=1
             ).sum(dim=1)
@@ -310,6 +332,8 @@ def _with_budget(row: dict[str, Any], budget: int, train_seed: int | str) -> dic
         "jobs": row["jobs"],
         "collisions": row["collisions"],
         "waiting": row["waiting"],
+        "invalid_requests": row.get("invalid_requests", 0),
+        "busy_requests": row.get("busy_requests", 0),
     }
 
 
@@ -331,6 +355,12 @@ def _budget_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "jobs_mean": statistics.fmean(float(row["jobs"]) for row in group),
                 "collisions_mean": statistics.fmean(float(row["collisions"]) for row in group),
                 "waiting_mean": statistics.fmean(float(row["waiting"]) for row in group),
+                "invalid_requests_mean": statistics.fmean(
+                    float(row.get("invalid_requests", 0)) for row in group
+                ),
+                "busy_requests_mean": statistics.fmean(
+                    float(row.get("busy_requests", 0)) for row in group
+                ),
             }
         )
     return output
@@ -356,10 +386,46 @@ def _summary(rows: list[dict[str, Any]], train_seeds: tuple[int, ...], eval_seed
         curves[policy] = points
     expected = len(FIXED_POLICIES) * len(eval_seeds) + len(ALGORITHMS) * len(train_seeds) * len(budgets) * len(eval_seeds)
     learned = [row for row in rows if row["policy"] in ALGORITHMS]
+    budget_by_seed: dict[str, dict[str, dict[int, float]]] = {}
+    for row in budget_rows:
+        budget_by_seed.setdefault(str(row["policy"]), {}).setdefault(
+            str(row["train_seed"]), {}
+        )[int(row["budget"])] = float(row["objective_mean"])
+    paired_objective_contrasts: dict[str, dict[str, Any]] = {}
+    t_critical_95 = {3: 4.302653, 10: 2.262157}
+    for policy in ALGORITHMS:
+        seed_curves = budget_by_seed.get(policy, {})
+        deltas = [
+            values[max(budgets)] - values[min(budgets)]
+            for values in seed_curves.values()
+            if min(budgets) in values and max(budgets) in values
+        ]
+        delta_mean = statistics.fmean(deltas) if deltas else None
+        standard_error = (
+            statistics.stdev(deltas) / len(deltas) ** 0.5 if len(deltas) > 1 else 0.0
+        )
+        critical = t_critical_95.get(len(deltas), 1.96)
+        half_width = critical * standard_error
+        paired_objective_contrasts[policy] = {
+            "low_budget": min(budgets),
+            "high_budget": max(budgets),
+            "training_seed_count": len(deltas),
+            "training_seed_deltas": deltas,
+            "mean_delta_high_minus_low": delta_mean,
+            "confidence_interval_95": (
+                [delta_mean - half_width, delta_mean + half_width]
+                if delta_mean is not None
+                else None
+            ),
+            "supports_objective_reduction": bool(
+                delta_mean is not None and delta_mean + half_width < 0
+            ),
+        }
     return {
         "purpose": "Training-budget diagnostic; not a final algorithm comparison.",
         "primary_metric": "mean objective cost on the common evaluation panel",
         "curves": curves,
+        "paired_objective_contrasts": paired_objective_contrasts,
         "audits": {
             "expected_episode_count": expected,
             "episode_count": len(rows),
@@ -382,13 +448,22 @@ def run(args: argparse.Namespace) -> Path:
     output.mkdir(parents=True, exist_ok=True)
     manifest: dict[str, Any] = {
         "status": "RUNNING",
-        "experiment": "passive_technician_budget_screen",
+        "experiment": (
+            "passive_technician_budget_replication"
+            if args.profile == "replication"
+            else "passive_technician_budget_screen"
+        ),
         "profile": args.profile,
         "stress_config": asdict(config),
         "budgets": list(budgets),
         "train_seeds": list(train_seeds),
         "evaluation_seeds": list(evaluation_seeds),
         "algorithms": list(ALGORITHMS),
+        "primary_contrast": (
+            "centralized_ppo objective at 20,000 minus 5,000 episodes across fresh training seeds"
+            if args.profile == "replication"
+            else None
+        ),
         "fixed_policies": list(FIXED_POLICIES),
         "settings": asdict(settings),
         "objective_version": OBJECTIVE_VERSION,
@@ -467,7 +542,11 @@ def _evaluate_q(config: PassiveConfig, learner: IndependentQ, seed: int, train_s
     observations = env.reset()
     done = False
     while not done:
-        actions = tuple(learner.action(machine, observations[machine], 0.0) for machine in range(config.machines))
+        masks = env.action_masks()
+        actions = tuple(
+            learner.action(machine, observations[machine], 0.0, masks[machine])
+            for machine in range(config.machines)
+        )
         observations, _, done, _ = env.step(actions)
     return {"policy": "independent_q", "seed": seed, "train_seed": train_seed, **env.metrics}
 
@@ -484,8 +563,17 @@ def _evaluate_independent_ppo(
     done = False
     while not done:
         obs = _obs_tensor(observations, config).to(device)
+        masks = env.action_masks()
         with torch.no_grad():
-            actions = [int(torch.argmax(policy(obs[machine : machine + 1])[0], dim=-1).item()) for machine, policy in enumerate(policies)]
+            actions = [
+                int(
+                    torch.argmax(
+                        _masked_logits(policy(obs[machine : machine + 1])[0], masks[machine]),
+                        dim=-1,
+                    ).item()
+                )
+                for machine, policy in enumerate(policies)
+            ]
         observations, _, done, _ = env.step(actions)
     return {"policy": "independent_ppo", "seed": seed, "train_seed": train_seed, **env.metrics}
 
@@ -501,16 +589,20 @@ def _evaluate_centralized_ppo(
     observations = env.reset()
     done = False
     while not done:
+        masks = env.action_masks()
         with torch.no_grad():
             logits, _ = policy(_obs_tensor(observations, config).flatten().unsqueeze(0).to(device))
-            actions = [int(torch.argmax(logits[0, machine]).item()) for machine in range(config.machines)]
+            actions = [
+                int(torch.argmax(_masked_logits(logits[0, machine], masks[machine])).item())
+                for machine in range(config.machines)
+            ]
         observations, _, done, _ = env.step(actions)
     return {"policy": "centralized_ppo", "seed": seed, "train_seed": train_seed, **env.metrics}
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", choices=("smoke", "pilot", "full"), required=True)
+    parser.add_argument("--profile", choices=("smoke", "pilot", "full", "replication"), required=True)
     parser.add_argument("--device", choices=("cpu", "cuda", "auto"), default="cpu")
     parser.add_argument("--output-dir", required=True)
     return parser

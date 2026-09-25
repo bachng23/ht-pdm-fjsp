@@ -97,8 +97,37 @@ class PassiveTechnicianEnv:
     def reset(self) -> tuple[tuple[int, ...], ...]:
         self.time = 0
         self.state = self.initial_state()
-        self.metrics = {"objective": 0.0, "failures": 0, "jobs": 0, "collisions": 0, "waiting": 0}
+        self.metrics = {
+            "objective": 0.0,
+            "failures": 0,
+            "jobs": 0,
+            "collisions": 0,
+            "waiting": 0,
+            "invalid_requests": 0,
+            "busy_requests": 0,
+        }
         return self.observations()
+
+    def action_mask(self, machine: int) -> tuple[bool, ...]:
+        """Return actions that do not create a duplicate machine request.
+
+        FIFO queueing intentionally permits a request for a busy technician.
+        A machine that is already queued or being serviced has no useful
+        nonzero action, however, so only defer remains valid in that state.
+        """
+        if not 0 <= machine < self.config.machines:
+            raise IndexError(f"unknown machine {machine}")
+        queued = any(machine in queue for queue in self.state.queues)
+        assigned = machine in self.state.assigned_machine
+        if queued or assigned:
+            return (True,) + (False,) * self.config.technicians
+        return (True,) + tuple(
+            math.isfinite(self.config.service_time[machine][technician])
+            for technician in range(self.config.technicians)
+        )
+
+    def action_masks(self) -> tuple[tuple[bool, ...], ...]:
+        return tuple(self.action_mask(machine) for machine in range(self.config.machines))
 
     @property
     def observation_dim(self) -> int:
@@ -154,10 +183,17 @@ class PassiveTechnicianEnv:
         accepted: dict[int, int] = {}
         collisions = sum(max(0, len(machines) - 1) for machines in selected.values())
         queues = [list(queue) for queue in state.queues]
+        queued = {machine for queue in queues for machine in queue}
+        assigned_machines = {machine for machine in state.assigned_machine if machine >= 0}
+        invalid_requests = 0
+        busy_requests = 0
         if cfg.semantics == "fifo_queue":
-            queued = {machine for queue in queues for machine in queue}
             for technician, machines in selected.items():
                 for machine in machines:
+                    busy_requests += int(state.busy_until[technician] > time)
+                    if machine in queued or machine in assigned_machines:
+                        invalid_requests += 1
+                        continue
                     if machine not in queued:
                         queues[technician].append(machine)
                         queued.add(machine)
@@ -168,13 +204,21 @@ class PassiveTechnicianEnv:
         else:
             waiting = 0
             for technician, machines in selected.items():
+                busy_requests += sum(state.busy_until[technician] > time for _ in machines)
+                eligible = [
+                    machine
+                    for machine in machines
+                    if machine not in queued and machine not in assigned_machines
+                ]
+                invalid_requests += len(machines) - len(eligible)
                 if cfg.semantics == "invalid_collision" and len(machines) > 1:
                     continue
                 if state.busy_until[technician] > time:
-                    waiting += len(machines)
+                    waiting += len(eligible)
                 else:
-                    accepted[technician] = min(machines)
-                    waiting += max(0, len(machines) - 1)
+                    if eligible:
+                        accepted[technician] = min(eligible)
+                        waiting += max(0, len(eligible) - 1)
 
         ages = list(state.ages)
         failed = list(state.failed)
@@ -214,7 +258,15 @@ class PassiveTechnicianEnv:
             tuple(ages), tuple(failed), tuple(busy_until), tuple(assigned),
             tuple(tuple(queue) for queue in queues),
         )
-        info = {"objective": objective, "failures": failures, "jobs": jobs, "collisions": collisions, "waiting": waiting}
+        info = {
+            "objective": objective,
+            "failures": failures,
+            "jobs": jobs,
+            "collisions": collisions,
+            "waiting": waiting,
+            "invalid_requests": invalid_requests,
+            "busy_requests": busy_requests,
+        }
         return next_state, objective, info
 
     def step(self, actions: Iterable[int]) -> tuple[tuple[int, ...], float, bool, dict[str, float]]:
@@ -304,11 +356,27 @@ class IndependentQ:
     def _key(self, obs: tuple[int, ...], action: int) -> tuple[tuple[int, ...], int]:
         return obs, action
 
-    def action(self, machine: int, obs: tuple[int, ...], epsilon: float) -> int:
-        values = [self.q[machine].get(self._key(obs, action), 0.0) for action in range(self.config.technicians + 1)]
+    def action(
+        self,
+        machine: int,
+        obs: tuple[int, ...],
+        epsilon: float,
+        mask: tuple[bool, ...] | None = None,
+    ) -> int:
+        valid_actions = [
+            action
+            for action in range(self.config.technicians + 1)
+            if mask is None or mask[action]
+        ]
+        if not valid_actions:
+            raise ValueError("action mask must leave at least one valid action")
+        values = [
+            self.q[machine].get(self._key(obs, action), 0.0)
+            for action in valid_actions
+        ]
         if self.rng.random() < epsilon:
-            return self.rng.randrange(self.config.technicians + 1)
-        return min(range(len(values)), key=lambda action: values[action])
+            return self.rng.choice(valid_actions)
+        return valid_actions[min(range(len(values)), key=lambda index: values[index])]
 
     def update(
         self,
@@ -317,9 +385,17 @@ class IndependentQ:
         action: int,
         cost: float,
         next_obs: tuple[int, ...],
+        next_mask: tuple[bool, ...] | None = None,
     ) -> None:
         old = self.q[machine].get(self._key(obs, action), 0.0)
-        future = min(self.q[machine].get(self._key(next_obs, a), 0.0) for a in range(self.config.technicians + 1))
+        valid_actions = [
+            a
+            for a in range(self.config.technicians + 1)
+            if next_mask is None or next_mask[a]
+        ]
+        if not valid_actions:
+            raise ValueError("next action mask must leave at least one valid action")
+        future = min(self.q[machine].get(self._key(next_obs, a), 0.0) for a in valid_actions)
         self.q[machine][self._key(obs, action)] = old + self.alpha * (cost + self.gamma * future - old)
 
     def save(self, path: Path) -> None:
@@ -358,10 +434,21 @@ def train_independent(config: PassiveConfig, seed: int, episodes: int) -> Indepe
         done = False
         epsilon = max(0.05, 1.0 - episode / max(1, episodes * 0.8))
         while not done:
-            actions = tuple(learner.action(m, obs[m], epsilon) for m in range(config.machines))
+            masks = env.action_masks()
+            actions = tuple(
+                learner.action(m, obs[m], epsilon, masks[m]) for m in range(config.machines)
+            )
             next_obs, reward, done, info = env.step(actions)
+            next_masks = env.action_masks()
             for machine in range(config.machines):
-                learner.update(machine, obs[machine], actions[machine], -reward, next_obs[machine])
+                learner.update(
+                    machine,
+                    obs[machine],
+                    actions[machine],
+                    -reward,
+                    next_obs[machine],
+                    next_masks[machine],
+                )
             obs = next_obs
     return learner
 
@@ -371,7 +458,10 @@ def evaluate_marl(config: PassiveConfig, learner: IndependentQ, seed: int, train
     obs = env.reset()
     done = False
     while not done:
-        actions = tuple(learner.action(m, obs[m], 0.0) for m in range(config.machines))
+        masks = env.action_masks()
+        actions = tuple(
+            learner.action(m, obs[m], 0.0, masks[m]) for m in range(config.machines)
+        )
         obs, _, done, _ = env.step(actions)
     return {"policy": "independent_marl", "seed": seed, "train_seed": train_seed, **env.metrics}
 

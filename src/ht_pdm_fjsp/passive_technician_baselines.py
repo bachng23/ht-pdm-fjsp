@@ -123,6 +123,13 @@ def _obs_tensor(
     return torch.tensor(observations, dtype=torch.float32) / float(scale)
 
 
+def _masked_logits(logits: torch.Tensor, mask: tuple[bool, ...] | torch.Tensor) -> torch.Tensor:
+    mask_tensor = torch.as_tensor(mask, dtype=torch.bool, device=logits.device)
+    if not bool(mask_tensor.any()):
+        raise ValueError("action mask must leave at least one valid action")
+    return logits.masked_fill(~mask_tensor, torch.finfo(logits.dtype).min)
+
+
 def _returns(
     rewards: list[float], gamma: float, device: torch.device | None = None
 ) -> torch.Tensor:
@@ -149,19 +156,22 @@ def train_independent_ppo(config: PassiveConfig, seed: int, settings: PPOSetting
         rollout_obs: list[list[torch.Tensor]] = [[] for _ in policies]
         rollout_actions: list[list[torch.Tensor]] = [[] for _ in policies]
         old_log_probs: list[list[torch.Tensor]] = [[] for _ in policies]
+        rollout_masks: list[list[torch.Tensor]] = [[] for _ in policies]
         rewards: list[float] = []
         done = False
         while not done:
             obs = _obs_tensor(observations, config)
+            masks = env.action_masks()
             actions: list[int] = []
             for machine, policy in enumerate(policies):
                 logits, value = policy(obs[machine : machine + 1])
-                distribution = Categorical(logits=logits)
+                distribution = Categorical(logits=_masked_logits(logits, masks[machine]))
                 action = distribution.sample()
                 actions.append(int(action.item()))
                 rollout_obs[machine].append(obs[machine].detach())
                 rollout_actions[machine].append(action.detach().squeeze(0))
                 old_log_probs[machine].append(distribution.log_prob(action).detach().squeeze(0))
+                rollout_masks[machine].append(torch.tensor(masks[machine], dtype=torch.bool))
             observations, reward, done, _ = env.step(actions)
             rewards.append(float(reward))
         returns = _returns(rewards, settings.gamma, device=next(policies[0].parameters()).device)
@@ -169,13 +179,14 @@ def train_independent_ppo(config: PassiveConfig, seed: int, settings: PPOSetting
             observations_tensor = torch.stack(rollout_obs[machine])
             actions_tensor = torch.stack(rollout_actions[machine])
             old_log_probs_tensor = torch.stack(old_log_probs[machine])
+            masks_tensor = torch.stack(rollout_masks[machine]).to(observations_tensor.device)
             with torch.no_grad():
                 _, old_values = policy(observations_tensor)
                 advantages = returns - old_values
                 advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
             for _ in range(settings.update_epochs):
                 logits, values_tensor = policy(observations_tensor)
-                distribution = Categorical(logits=logits)
+                distribution = Categorical(logits=_masked_logits(logits, masks_tensor))
                 log_probs_tensor = distribution.log_prob(actions_tensor)
                 ratio = torch.exp(log_probs_tensor - old_log_probs_tensor)
                 clipped = torch.clamp(ratio, 1.0 - settings.clip_ratio, 1.0 + settings.clip_ratio)
@@ -211,10 +222,12 @@ def evaluate_independent_ppo(config: PassiveConfig, policies: list[ActorCritic],
     done = False
     while not done:
         obs = _obs_tensor(observations, config)
+        masks = env.action_masks()
         actions = []
         with torch.no_grad():
             for machine, policy in enumerate(policies):
                 logits, _ = policy(obs[machine : machine + 1])
+                logits = _masked_logits(logits, masks[machine])
                 actions.append(int(torch.argmax(logits, dim=-1).item()))
         observations, _, done, _ = env.step(actions)
     return {"policy": "independent_ppo", "seed": seed, "train_seed": train_seed, **env.metrics}
@@ -252,14 +265,20 @@ def train_centralized_ppo(config: PassiveConfig, seed: int, settings: PPOSetting
         rollout_obs: list[torch.Tensor] = []
         rollout_actions: list[torch.Tensor] = []
         old_log_probs: list[torch.Tensor] = []
+        rollout_masks: list[torch.Tensor] = []
         rewards: list[float] = []
         done = False
         while not done:
             logits, value = policy(_obs_tensor(observations, config).flatten().unsqueeze(0))
-            distributions = [Categorical(logits=logits[0, machine]) for machine in range(config.machines)]
+            masks = env.action_masks()
+            distributions = [
+                Categorical(logits=_masked_logits(logits[0, machine], masks[machine]))
+                for machine in range(config.machines)
+            ]
             actions = [int(distribution.sample().item()) for distribution in distributions]
             rollout_obs.append(_obs_tensor(observations, config).flatten().detach())
             rollout_actions.append(torch.tensor(actions, dtype=torch.long))
+            rollout_masks.append(torch.tensor(masks, dtype=torch.bool))
             old_log_probs.append(torch.stack([distribution.log_prob(torch.tensor(action)) for distribution, action in zip(distributions, actions)]).detach().sum())
             observations, reward, done, _ = env.step(actions)
             rewards.append(float(reward))
@@ -267,13 +286,17 @@ def train_centralized_ppo(config: PassiveConfig, seed: int, settings: PPOSetting
         observations_tensor = torch.stack(rollout_obs)
         actions_tensor = torch.stack(rollout_actions)
         old_log_probs_tensor = torch.stack(old_log_probs)
+        masks_tensor = torch.stack(rollout_masks).to(observations_tensor.device)
         with torch.no_grad():
             _, old_values = policy(observations_tensor)
             advantages = returns - old_values
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         for _ in range(settings.update_epochs):
             logits, value_tensor = policy(observations_tensor)
-            distributions = [Categorical(logits=logits[:, machine]) for machine in range(config.machines)]
+            distributions = [
+                Categorical(logits=_masked_logits(logits[:, machine], masks_tensor[:, machine]))
+                for machine in range(config.machines)
+            ]
             log_probs_tensor = torch.stack(
                 [distribution.log_prob(actions_tensor[:, machine]) for machine, distribution in enumerate(distributions)],
                 dim=1,
@@ -308,9 +331,13 @@ def evaluate_centralized_ppo(config: PassiveConfig, policy: CentralizedPPO, seed
     observations = env.reset()
     done = False
     while not done:
+        masks = env.action_masks()
         with torch.no_grad():
             logits, _ = policy(_obs_tensor(observations, config).flatten().unsqueeze(0))
-            actions = [int(torch.argmax(logits[0, machine]).item()) for machine in range(config.machines)]
+            actions = [
+                int(torch.argmax(_masked_logits(logits[0, machine], masks[machine])).item())
+                for machine in range(config.machines)
+            ]
         observations, _, done, _ = env.step(actions)
     return {"policy": "centralized_ppo", "seed": seed, "train_seed": train_seed, **env.metrics}
 

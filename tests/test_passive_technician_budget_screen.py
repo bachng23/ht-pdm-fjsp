@@ -6,7 +6,13 @@ from pathlib import Path
 import torch
 
 import ht_pdm_fjsp.passive_technician_budget_screen as budget_screen
-from ht_pdm_fjsp.passive_technician_budget_screen import ALGORITHMS, BUDGETS, run
+from ht_pdm_fjsp.passive_technician_budget_screen import (
+    ALGORITHMS,
+    BUDGETS,
+    _profile,
+    _summary,
+    run,
+)
 from ht_pdm_fjsp.passive_technician_baselines import PPOSettings, stress_config
 
 
@@ -37,6 +43,41 @@ def test_smoke_budget_screen_writes_checkpoints_and_schema(tmp_path: Path) -> No
 
 def test_full_budget_constants_are_locked() -> None:
     assert BUDGETS == (5_000, 10_000, 20_000)
+
+
+def test_replication_profile_uses_fresh_training_seeds_and_locked_panels() -> None:
+    train_seeds, evaluation_seeds, budgets = _profile("replication")
+
+    assert train_seeds == tuple(range(14, 24))
+    assert evaluation_seeds == tuple(range(101, 201))
+    assert budgets == BUDGETS
+
+
+def test_summary_uses_training_seeds_for_paired_budget_interval() -> None:
+    rows = []
+    for train_seed, delta in ((14, -2.0), (15, -3.0), (16, -4.0)):
+        for budget, objective in ((5_000, 10.0), (20_000, 10.0 + delta)):
+            rows.append(
+                {
+                    "policy": "centralized_ppo",
+                    "budget": budget,
+                    "seed": 101,
+                    "train_seed": train_seed,
+                    "objective": objective,
+                    "failures": 0,
+                    "jobs": 1,
+                    "collisions": 0,
+                    "waiting": 0,
+                }
+            )
+
+    result = _summary(rows, (14, 15, 16), (101,), (5_000, 20_000))
+    contrast = result["paired_objective_contrasts"]["centralized_ppo"]
+
+    assert contrast["training_seed_count"] == 3
+    assert contrast["training_seed_deltas"] == [-2.0, -3.0, -4.0]
+    assert contrast["mean_delta_high_minus_low"] == -3.0
+    assert contrast["supports_objective_reduction"]
 
 
 def test_centralized_ppo_builds_returns_on_requested_device(tmp_path: Path, monkeypatch) -> None:

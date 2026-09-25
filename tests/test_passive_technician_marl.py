@@ -17,6 +17,33 @@ def test_fixed_technician_service_times_and_collision_resolution() -> None:
     assert env.state.busy_until == (1,)
 
 
+def test_duplicate_request_from_machine_in_service_is_rejected() -> None:
+    config = PassiveConfig(machines=2, technicians=1, horizon=3, service_time=((2,), (2,)))
+    env = PassiveTechnicianEnv(config)
+    env.reset()
+    env.step((1, 0))
+
+    assert env.action_masks()[0] == (True, False)
+    _, _, _, info = env.step((1, 0))
+
+    assert info["invalid_requests"] == 1
+    assert env.state.queues == ((),)
+
+
+def test_duplicate_request_from_queued_machine_is_rejected() -> None:
+    config = PassiveConfig(machines=2, technicians=1, horizon=4, service_time=((3,), (3,)))
+    env = PassiveTechnicianEnv(config)
+    env.reset()
+    env.step((1, 1))
+
+    assert env.state.queues == ((1,),)
+    assert env.action_masks()[1] == (True, False)
+    _, _, _, info = env.step((0, 1))
+
+    assert info["invalid_requests"] == 1
+    assert env.state.queues == ((1,),)
+
+
 def test_dispatcher_uses_fastest_feasible_technician() -> None:
     config = PassiveConfig()
     env = PassiveTechnicianEnv(config)
