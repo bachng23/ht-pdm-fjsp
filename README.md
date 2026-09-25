@@ -61,6 +61,18 @@ uv run ht-pdm-fjsp-passive-v2-calibrate \
 The locked factorial and selection rule are documented in
 `docs/passive_technician_v2_calibration_plan.md`.
 
+Train machine-agent policies on the selected calibrated scenario:
+
+```bash
+uv run ht-pdm-fjsp-passive-v2-learn \
+  --profile smoke \
+  --device cpu \
+  --output-dir "artifacts/passive_v2_learning_smoke_$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+The locked PS-IPPO, MAPPO, and centralized PPO comparison is documented in
+`docs/passive_technician_v2_learning_plan.md`.
+
 ## Setup
 
 ```bash
