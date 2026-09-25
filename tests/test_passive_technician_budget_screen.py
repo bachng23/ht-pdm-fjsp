@@ -33,8 +33,24 @@ def test_smoke_budget_screen_writes_checkpoints_and_schema(tmp_path: Path) -> No
     with (output / "episodes.csv").open(newline="") as handle:
         rows = list(csv.DictReader(handle))
     assert rows
-    assert {"policy", "budget", "seed", "train_seed", "objective"}.issubset(rows[0])
+    assert {
+        "policy",
+        "budget",
+        "seed",
+        "train_seed",
+        "objective",
+        "invalid_requests",
+        "busy_requests",
+        "unique_joint_actions",
+        "defer_fraction",
+        "request_count",
+    }.issubset(rows[0])
     assert all(row["train_seed"] for row in rows if row["policy"] in ALGORITHMS)
+    assert all(
+        int(row["invalid_requests"]) == 0
+        for row in rows
+        if row["policy"] in ALGORITHMS
+    )
     for algorithm in ALGORITHMS:
         for budget in (8, 16, 32):
             suffix = "model.json" if algorithm == "independent_q" else "model.pt"

@@ -74,11 +74,23 @@ def random_feasible_action(env: PassiveTechnicianEnv) -> tuple[int, ...]:
 def evaluate_fixed(config: PassiveConfig, policy_name: str, seed: int) -> dict[str, Any]:
     env = PassiveTechnicianEnv(config, seed=seed)
     env.reset()
+    joint_actions: set[tuple[int, ...]] = set()
+    defer_actions = 0
+    action_steps = 0
     done = False
     while not done:
         action = random_feasible_action(env) if policy_name == "random_feasible" else dispatcher_action(env)
+        joint_actions.add(tuple(action))
+        defer_actions += sum(item == 0 for item in action)
+        action_steps += 1
         _, _, done, _ = env.step(action)
-    return {"policy": policy_name, "seed": seed, "train_seed": "", **env.metrics}
+    return {
+        "policy": policy_name,
+        "seed": seed,
+        "train_seed": "",
+        **env.metrics,
+        **_action_diagnostics(config, joint_actions, defer_actions, action_steps),
+    }
 
 
 class ActorCritic(nn.Module):
@@ -139,6 +151,21 @@ def _returns(
         running = reward + gamma * running
         output.append(running)
     return torch.tensor(list(reversed(output)), dtype=torch.float32, device=device)
+
+
+def _action_diagnostics(
+    config: PassiveConfig,
+    joint_actions: set[tuple[int, ...]],
+    defer_actions: int,
+    action_steps: int,
+) -> dict[str, float | int]:
+    total_actions = action_steps * config.machines
+    return {
+        "unique_joint_actions": len(joint_actions),
+        "defer_fraction": defer_actions / total_actions if total_actions else 0.0,
+        "action_steps": action_steps,
+        "request_count": total_actions - defer_actions,
+    }
 
 
 def train_independent_ppo(config: PassiveConfig, seed: int, settings: PPOSettings, output: Path) -> Path:
@@ -219,6 +246,9 @@ def load_independent_ppo(config: PassiveConfig, path: Path) -> list[ActorCritic]
 def evaluate_independent_ppo(config: PassiveConfig, policies: list[ActorCritic], seed: int, train_seed: int) -> dict[str, Any]:
     env = PassiveTechnicianEnv(config, seed=seed)
     observations = env.reset()
+    joint_actions: set[tuple[int, ...]] = set()
+    defer_actions = 0
+    action_steps = 0
     done = False
     while not done:
         obs = _obs_tensor(observations, config)
@@ -229,8 +259,18 @@ def evaluate_independent_ppo(config: PassiveConfig, policies: list[ActorCritic],
                 logits, _ = policy(obs[machine : machine + 1])
                 logits = _masked_logits(logits, masks[machine])
                 actions.append(int(torch.argmax(logits, dim=-1).item()))
+        joint_action = tuple(actions)
+        joint_actions.add(joint_action)
+        defer_actions += sum(action == 0 for action in joint_action)
+        action_steps += 1
         observations, _, done, _ = env.step(actions)
-    return {"policy": "independent_ppo", "seed": seed, "train_seed": train_seed, **env.metrics}
+    return {
+        "policy": "independent_ppo",
+        "seed": seed,
+        "train_seed": train_seed,
+        **env.metrics,
+        **_action_diagnostics(config, joint_actions, defer_actions, action_steps),
+    }
 
 
 class CentralizedPPO(nn.Module):
@@ -329,6 +369,9 @@ def load_centralized_ppo(config: PassiveConfig, path: Path) -> CentralizedPPO:
 def evaluate_centralized_ppo(config: PassiveConfig, policy: CentralizedPPO, seed: int, train_seed: int) -> dict[str, Any]:
     env = PassiveTechnicianEnv(config, seed=seed)
     observations = env.reset()
+    joint_actions: set[tuple[int, ...]] = set()
+    defer_actions = 0
+    action_steps = 0
     done = False
     while not done:
         masks = env.action_masks()
@@ -338,8 +381,18 @@ def evaluate_centralized_ppo(config: PassiveConfig, policy: CentralizedPPO, seed
                 int(torch.argmax(_masked_logits(logits[0, machine], masks[machine])).item())
                 for machine in range(config.machines)
             ]
+        joint_action = tuple(actions)
+        joint_actions.add(joint_action)
+        defer_actions += sum(action == 0 for action in joint_action)
+        action_steps += 1
         observations, _, done, _ = env.step(actions)
-    return {"policy": "centralized_ppo", "seed": seed, "train_seed": train_seed, **env.metrics}
+    return {
+        "policy": "centralized_ppo",
+        "seed": seed,
+        "train_seed": train_seed,
+        **env.metrics,
+        **_action_diagnostics(config, joint_actions, defer_actions, action_steps),
+    }
 
 
 def _write_csv(rows: list[dict], path: Path) -> None:

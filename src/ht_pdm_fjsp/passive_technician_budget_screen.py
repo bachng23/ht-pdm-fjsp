@@ -26,6 +26,7 @@ from ht_pdm_fjsp.passive_technician_baselines import (
     PPOSettings,
     _obs_tensor,
     _masked_logits,
+    _action_diagnostics,
     _returns,
     evaluate_centralized_ppo,
     evaluate_fixed,
@@ -58,6 +59,10 @@ FIELDNAMES = (
     "waiting",
     "invalid_requests",
     "busy_requests",
+    "unique_joint_actions",
+    "defer_fraction",
+    "action_steps",
+    "request_count",
 )
 
 
@@ -334,6 +339,10 @@ def _with_budget(row: dict[str, Any], budget: int, train_seed: int | str) -> dic
         "waiting": row["waiting"],
         "invalid_requests": row.get("invalid_requests", 0),
         "busy_requests": row.get("busy_requests", 0),
+        "unique_joint_actions": row.get("unique_joint_actions", 0),
+        "defer_fraction": row.get("defer_fraction", 0.0),
+        "action_steps": row.get("action_steps", 0),
+        "request_count": row.get("request_count", 0),
     }
 
 
@@ -360,6 +369,18 @@ def _budget_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 ),
                 "busy_requests_mean": statistics.fmean(
                     float(row.get("busy_requests", 0)) for row in group
+                ),
+                "unique_joint_actions_mean": statistics.fmean(
+                    float(row.get("unique_joint_actions", 0)) for row in group
+                ),
+                "defer_fraction_mean": statistics.fmean(
+                    float(row.get("defer_fraction", 0.0)) for row in group
+                ),
+                "action_steps_mean": statistics.fmean(
+                    float(row.get("action_steps", 0)) for row in group
+                ),
+                "request_count_mean": statistics.fmean(
+                    float(row.get("request_count", 0)) for row in group
                 ),
             }
         )
@@ -540,6 +561,9 @@ def run(args: argparse.Namespace) -> Path:
 def _evaluate_q(config: PassiveConfig, learner: IndependentQ, seed: int, train_seed: int) -> dict[str, Any]:
     env = PassiveTechnicianEnv(config, seed=seed)
     observations = env.reset()
+    joint_actions: set[tuple[int, ...]] = set()
+    defer_actions = 0
+    action_steps = 0
     done = False
     while not done:
         masks = env.action_masks()
@@ -547,8 +571,17 @@ def _evaluate_q(config: PassiveConfig, learner: IndependentQ, seed: int, train_s
             learner.action(machine, observations[machine], 0.0, masks[machine])
             for machine in range(config.machines)
         )
+        joint_actions.add(actions)
+        defer_actions += sum(action == 0 for action in actions)
+        action_steps += 1
         observations, _, done, _ = env.step(actions)
-    return {"policy": "independent_q", "seed": seed, "train_seed": train_seed, **env.metrics}
+    return {
+        "policy": "independent_q",
+        "seed": seed,
+        "train_seed": train_seed,
+        **env.metrics,
+        **_action_diagnostics(config, joint_actions, defer_actions, action_steps),
+    }
 
 
 def _evaluate_independent_ppo(
@@ -560,6 +593,9 @@ def _evaluate_independent_ppo(
 ) -> dict[str, Any]:
     env = PassiveTechnicianEnv(config, seed=seed)
     observations = env.reset()
+    joint_actions: set[tuple[int, ...]] = set()
+    defer_actions = 0
+    action_steps = 0
     done = False
     while not done:
         obs = _obs_tensor(observations, config).to(device)
@@ -574,8 +610,18 @@ def _evaluate_independent_ppo(
                 )
                 for machine, policy in enumerate(policies)
             ]
+        joint_action = tuple(actions)
+        joint_actions.add(joint_action)
+        defer_actions += sum(action == 0 for action in joint_action)
+        action_steps += 1
         observations, _, done, _ = env.step(actions)
-    return {"policy": "independent_ppo", "seed": seed, "train_seed": train_seed, **env.metrics}
+    return {
+        "policy": "independent_ppo",
+        "seed": seed,
+        "train_seed": train_seed,
+        **env.metrics,
+        **_action_diagnostics(config, joint_actions, defer_actions, action_steps),
+    }
 
 
 def _evaluate_centralized_ppo(
@@ -587,6 +633,9 @@ def _evaluate_centralized_ppo(
 ) -> dict[str, Any]:
     env = PassiveTechnicianEnv(config, seed=seed)
     observations = env.reset()
+    joint_actions: set[tuple[int, ...]] = set()
+    defer_actions = 0
+    action_steps = 0
     done = False
     while not done:
         masks = env.action_masks()
@@ -596,8 +645,18 @@ def _evaluate_centralized_ppo(
                 int(torch.argmax(_masked_logits(logits[0, machine], masks[machine])).item())
                 for machine in range(config.machines)
             ]
+        joint_action = tuple(actions)
+        joint_actions.add(joint_action)
+        defer_actions += sum(action == 0 for action in joint_action)
+        action_steps += 1
         observations, _, done, _ = env.step(actions)
-    return {"policy": "centralized_ppo", "seed": seed, "train_seed": train_seed, **env.metrics}
+    return {
+        "policy": "centralized_ppo",
+        "seed": seed,
+        "train_seed": train_seed,
+        **env.metrics,
+        **_action_diagnostics(config, joint_actions, defer_actions, action_steps),
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
