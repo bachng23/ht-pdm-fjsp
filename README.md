@@ -27,6 +27,27 @@ uv run ht-pdm-fjsp-parallel-maintenance \
 See `docs/parallel_maintenance_baseline_scan_plan.md` for the locked hypotheses,
 metrics, seed panels, stopping rule, audit gate, and artifact contract.
 
+## Passive shared-technician simulator v2
+
+The v2 simulator narrows the research question to machine agents coordinating
+maintenance timing and technician selection. Technicians are passive resources
+with fixed eligibility and machine-specific service durations. The simulator
+models explicit FIFO queues, multi-step service, preventive-to-corrective queue
+conversion after failure, terminal residual costs, keyed failure shocks, and
+state invariants.
+
+Run the mechanics validation before training any learning policy:
+
+```bash
+uv run ht-pdm-fjsp-passive-v2-validate \
+  --profile smoke \
+  --device cpu \
+  --output-dir "artifacts/passive_v2_smoke_$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+The locked hypotheses, seed panels, stopping rule, validation gates, and
+artifact schema are in `docs/passive_technician_simulator_v2_plan.md`.
+
 ## Setup
 
 ```bash
