@@ -19,7 +19,14 @@ from ht_pdm_fjsp.passive_technician_baselines import (
 from ht_pdm_fjsp.passive_technician_marl import PassiveConfig, PassiveTechnicianEnv
 
 
-VALUE_ALGORITHMS = ("vdn", "qmix", "tqmix")
+VALUE_ALGORITHMS = (
+    "vdn",
+    "qmix",
+    "qmix_edge",
+    "qmix_queue",
+    "qmix_counterfactual",
+    "tqmix",
+)
 
 
 @dataclass(frozen=True)
@@ -158,15 +165,21 @@ class PassiveValueDecomposition(nn.Module):
         if algorithm not in VALUE_ALGORITHMS:
             raise ValueError(algorithm)
         self.algorithm = algorithm
+        self.use_edge_q = algorithm in {"qmix_edge", "tqmix"}
+        self.use_queue_mixer = algorithm in {"qmix_queue", "tqmix"}
+        self.use_counterfactual = algorithm in {"qmix_counterfactual", "tqmix"}
         self.machines = config.machines
         self.observation_dim = config.observation_dim
         self.action_dim = config.technicians + 1
         self.hidden_dim = hidden_dim
         self.mixer_hidden_dim = mixer_hidden_dim
-        if algorithm == "tqmix":
+        if self.use_edge_q:
             self.agent = TechnicianEdgeQ(
                 config.observation_dim, config.technicians, hidden_dim
             )
+        else:
+            self.agent = LocalQ(config.observation_dim, self.action_dim, hidden_dim)
+        if self.use_queue_mixer:
             self.mixer = TechnicianAwareMixer(
                 config.machines,
                 config.observation_dim,
@@ -174,15 +187,10 @@ class PassiveValueDecomposition(nn.Module):
                 mixer_hidden_dim,
             )
         else:
-            self.agent = LocalQ(config.observation_dim, self.action_dim, hidden_dim)
-            self.mixer = (
-                PassiveQMixer(
-                    config.machines,
-                    config.machines * config.observation_dim,
-                    mixer_hidden_dim,
-                )
-                if algorithm == "qmix"
-                else None
+            self.mixer = PassiveQMixer(
+                config.machines,
+                config.machines * config.observation_dim,
+                mixer_hidden_dim,
             )
 
     def agent_q(self, local: torch.Tensor) -> torch.Tensor:
@@ -205,7 +213,7 @@ class PassiveValueDecomposition(nn.Module):
         masks: torch.Tensor,
     ) -> torch.Tensor:
         """Align local technician differences with joint counterfactual values."""
-        if self.algorithm != "tqmix":
+        if not self.use_counterfactual:
             return torch.zeros((), device=local.device)
         values = self.agent_q(local)
         chosen = values.gather(-1, actions.unsqueeze(-1)).squeeze(-1)
@@ -388,7 +396,7 @@ def train_value_decomposition_checkpoints(
                         target_q = torch.as_tensor(batch["rewards"], dtype=torch.float32, device=device) + settings.gamma * (~torch.as_tensor(batch["dones"], dtype=torch.bool, device=device)).float() * next_q
                     td_loss = (chosen_q - target_q).pow(2).mean()
                     consistency = online.local_edge_consistency(batch_local, batch_actions, batch_masks)
-                    loss = td_loss + (0.05 * consistency if algorithm == "tqmix" else 0.0)
+                    loss = td_loss + (0.05 * consistency if online.use_counterfactual else 0.0)
                     optimizer.zero_grad()
                     loss.backward()
                     nn.utils.clip_grad_norm_(online.parameters(), 5.0)
