@@ -3,7 +3,11 @@ import csv
 import json
 from pathlib import Path
 
+import torch
+
+import ht_pdm_fjsp.passive_technician_budget_screen as budget_screen
 from ht_pdm_fjsp.passive_technician_budget_screen import ALGORITHMS, BUDGETS, run
+from ht_pdm_fjsp.passive_technician_baselines import PPOSettings, stress_config
 
 
 def test_smoke_budget_screen_writes_checkpoints_and_schema(tmp_path: Path) -> None:
@@ -33,3 +37,25 @@ def test_smoke_budget_screen_writes_checkpoints_and_schema(tmp_path: Path) -> No
 
 def test_full_budget_constants_are_locked() -> None:
     assert BUDGETS == (5_000, 10_000, 20_000)
+
+
+def test_centralized_ppo_builds_returns_on_requested_device(tmp_path: Path, monkeypatch) -> None:
+    requested_device = torch.device("cpu")
+    observed_devices: list[torch.device | None] = []
+    original_returns = budget_screen._returns
+
+    def tracked_returns(rewards, gamma, device=None):
+        observed_devices.append(device)
+        return original_returns(rewards, gamma, device=device)
+
+    monkeypatch.setattr(budget_screen, "_returns", tracked_returns)
+    budget_screen._train_centralized_ppo_checkpoints(
+        stress_config(),
+        seed=11,
+        budgets=(1,),
+        root=tmp_path / "centralized",
+        settings=PPOSettings(episodes=1, update_epochs=1),
+        device=requested_device,
+    )
+
+    assert observed_devices == [requested_device]

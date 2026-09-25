@@ -123,13 +123,15 @@ def _obs_tensor(
     return torch.tensor(observations, dtype=torch.float32) / float(scale)
 
 
-def _returns(rewards: list[float], gamma: float) -> torch.Tensor:
+def _returns(
+    rewards: list[float], gamma: float, device: torch.device | None = None
+) -> torch.Tensor:
     output: list[float] = []
     running = 0.0
     for reward in reversed(rewards):
         running = reward + gamma * running
         output.append(running)
-    return torch.tensor(list(reversed(output)), dtype=torch.float32)
+    return torch.tensor(list(reversed(output)), dtype=torch.float32, device=device)
 
 
 def train_independent_ppo(config: PassiveConfig, seed: int, settings: PPOSettings, output: Path) -> Path:
@@ -162,7 +164,7 @@ def train_independent_ppo(config: PassiveConfig, seed: int, settings: PPOSetting
                 old_log_probs[machine].append(distribution.log_prob(action).detach().squeeze(0))
             observations, reward, done, _ = env.step(actions)
             rewards.append(float(reward))
-        returns = _returns(rewards, settings.gamma)
+        returns = _returns(rewards, settings.gamma, device=next(policies[0].parameters()).device)
         for machine, policy in enumerate(policies):
             observations_tensor = torch.stack(rollout_obs[machine])
             actions_tensor = torch.stack(rollout_actions[machine])
@@ -261,7 +263,7 @@ def train_centralized_ppo(config: PassiveConfig, seed: int, settings: PPOSetting
             old_log_probs.append(torch.stack([distribution.log_prob(torch.tensor(action)) for distribution, action in zip(distributions, actions)]).detach().sum())
             observations, reward, done, _ = env.step(actions)
             rewards.append(float(reward))
-        returns = _returns(rewards, settings.gamma)
+        returns = _returns(rewards, settings.gamma, device=next(policy.parameters()).device)
         observations_tensor = torch.stack(rollout_obs)
         actions_tensor = torch.stack(rollout_actions)
         old_log_probs_tensor = torch.stack(old_log_probs)

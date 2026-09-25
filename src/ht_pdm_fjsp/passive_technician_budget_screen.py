@@ -188,7 +188,7 @@ def _train_independent_ppo_checkpoints(
                 old_log_probs[machine].append(distribution.log_prob(action).detach().squeeze(0))
             observations, reward, done, _ = env.step(actions)
             rewards.append(float(reward))
-        returns = _returns(rewards, settings.gamma).to(device)
+        returns = _returns(rewards, settings.gamma, device=device)
         for machine, policy in enumerate(policies):
             observations_tensor = torch.stack(rollout_obs[machine])
             actions_tensor = torch.stack(rollout_actions[machine])
@@ -265,7 +265,7 @@ def _train_centralized_ppo_checkpoints(
             )
             observations, reward, done, _ = env.step(actions)
             rewards.append(float(reward))
-        returns = _returns(rewards, settings.gamma)
+        returns = _returns(rewards, settings.gamma, device=device)
         observations_tensor = torch.stack(rollout_obs)
         actions_tensor = torch.stack(rollout_actions)
         old_log_probs_tensor = torch.stack(old_log_probs)
