@@ -48,6 +48,19 @@ uv run ht-pdm-fjsp-passive-v2-validate \
 The locked hypotheses, seed panels, stopping rule, validation gates, and
 artifact schema are in `docs/passive_technician_simulator_v2_plan.md`.
 
+Calibrate a scenario that activates both maintenance timing and technician
+selection before training learning policies:
+
+```bash
+uv run ht-pdm-fjsp-passive-v2-calibrate \
+  --profile smoke \
+  --device cpu \
+  --output-dir "artifacts/passive_v2_calibration_smoke_$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+The locked factorial and selection rule are documented in
+`docs/passive_technician_v2_calibration_plan.md`.
+
 ## Setup
 
 ```bash

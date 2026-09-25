@@ -44,6 +44,7 @@ class PassiveTechnicianV2Config:
         (True, True),
         (True, True),
     )
+    initial_ages: tuple[int, ...] = ()
     preventive_cost: float = 1.0
     corrective_cost: float = 3.0
     downtime_cost: float = 4.0
@@ -69,6 +70,10 @@ class PassiveTechnicianV2Config:
             raise ValueError("failure_probability must be in [0, 1]")
         if len(self.service_time) != self.machines or len(self.eligibility) != self.machines:
             raise ValueError("service_time and eligibility need one row per machine")
+        if self.initial_ages and len(self.initial_ages) != self.machines:
+            raise ValueError("initial_ages needs one entry per machine")
+        if any(not 0 <= age <= self.max_age for age in self.initial_ages):
+            raise ValueError("initial ages must be between zero and max_age")
         for machine in range(self.machines):
             if len(self.service_time[machine]) != self.technicians:
                 raise ValueError("service_time needs one entry per technician")
@@ -140,8 +145,9 @@ class PassiveTechnicianV2Env:
 
     def initial_state(self) -> PassiveTechnicianV2State:
         cfg = self.config
+        ages = cfg.initial_ages if cfg.initial_ages else (0,) * cfg.machines
         return PassiveTechnicianV2State(
-            ages=(0,) * cfg.machines,
+            ages=ages,
             modes=(int(MachineMode.OPERATING),) * cfg.machines,
             machine_technician=(-1,) * cfg.machines,
             service_remaining=(0,) * cfg.machines,

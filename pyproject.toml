@@ -66,6 +66,7 @@ ht-pdm-fjsp-clean-conflict = "ht_pdm_fjsp.clean_conflict_attribution:main"
 ht-pdm-fjsp-committed-rl-baselines = "ht_pdm_fjsp.committed_conflict_rl_experiment:main"
 ht-pdm-fjsp-coordination-stress = "ht_pdm_fjsp.coordination_stress_baselines:main"
 ht-pdm-fjsp-passive-v2-validate = "ht_pdm_fjsp.passive_technician_v2_validation:main"
+ht-pdm-fjsp-passive-v2-calibrate = "ht_pdm_fjsp.passive_technician_v2_calibration:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

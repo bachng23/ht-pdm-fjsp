@@ -147,6 +147,24 @@ def test_action_masks_encode_machine_state_and_technician_eligibility() -> None:
     assert env.action_masks(queued) == ((True, False, False), (True, False, False))
 
 
+def test_initial_age_profile_is_validated_and_restored_on_reset() -> None:
+    cfg = config(
+        machines=2,
+        service_time=((2,), (2,)),
+        eligibility=((True,), (True,)),
+    )
+    cfg = replace(cfg, initial_ages=(1, 4))
+    env = PassiveTechnicianV2Env(cfg)
+    assert env.state.ages == (1, 4)
+    env.step((0, 0))
+    assert env.state.ages == (2, 5)
+    env.reset()
+    assert env.state.ages == (1, 4)
+
+    with pytest.raises(ValueError, match="initial_ages"):
+        PassiveTechnicianV2Env(replace(cfg, initial_ages=(1,)))
+
+
 def test_state_audit_rejects_duplicate_assignment() -> None:
     cfg = config(
         machines=1,
