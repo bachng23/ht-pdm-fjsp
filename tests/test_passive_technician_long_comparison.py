@@ -9,15 +9,21 @@ from ht_pdm_fjsp.passive_technician_value_decomposition import (
     ValueTrainSettings,
     train_value_decomposition_checkpoints,
 )
-from ht_pdm_fjsp.passive_technician_long_comparison import _profile
+from ht_pdm_fjsp.passive_technician_long_comparison import _profile, environment_cells
 
 
 def test_long_comparison_protocol_is_locked() -> None:
     train, evaluation, budgets = _profile("full")
 
-    assert train == (11, 12, 13)
+    assert train == tuple(range(11, 16))
     assert evaluation == tuple(range(101, 201))
-    assert budgets == (5_000, 20_000, 50_000)
+    assert budgets == (5_000, 10_000, 20_000, 50_000)
+    assert set(environment_cells()) == {
+        "in_distribution",
+        "early_failure",
+        "slow_service",
+        "combined_pressure",
+    }
 
 
 def test_technician_edge_q_and_tqmix_checkpoint_round_trip(tmp_path: Path) -> None:

@@ -59,14 +59,19 @@ def oracle_config() -> PassiveConfig:
 
 
 def random_feasible_action(env: PassiveTechnicianEnv) -> tuple[int, ...]:
-    available = [technician for technician in range(env.config.technicians) if env.available(technician)]
-    env.rng.shuffle(available)
     actions = [0] * env.config.machines
-    for machine in env.rng.sample(range(env.config.machines), env.config.machines):
+    machines = env.rng.sample(range(env.config.machines), env.config.machines)
+    for machine in machines:
+        valid_actions = env.action_masks()[machine]
+        available = [
+            technician
+            for technician in range(env.config.technicians)
+            if env.available(technician) and valid_actions[technician + 1]
+        ]
         if not available:
-            break
+            continue
         if env.state.failed[machine] or env.state.ages[machine] >= env.config.failure_age - 1:
-            technician = available.pop()
+            technician = env.rng.choice(available)
             actions[machine] = technician + 1
     return tuple(actions)
 

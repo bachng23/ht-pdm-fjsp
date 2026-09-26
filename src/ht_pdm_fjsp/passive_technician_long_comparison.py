@@ -15,23 +15,8 @@ from typing import Any
 import torch
 from tqdm.auto import tqdm
 
-from ht_pdm_fjsp.passive_technician_baselines import (
-    PPOSettings,
-    evaluate_fixed,
-    load_centralized_ppo,
-    stress_config,
-)
-from ht_pdm_fjsp.passive_technician_budget_screen import (
-    _evaluate_centralized_ppo,
-    _evaluate_q,
-    _train_centralized_ppo_checkpoints,
-    _train_q_checkpoints,
-)
-from ht_pdm_fjsp.passive_technician_counterfactual import (
-    QueueAwareCounterfactualPolicy,
-    evaluate_queue_aware_counterfactual,
-    train_queue_aware_counterfactual,
-)
+from ht_pdm_fjsp.passive_technician_baselines import evaluate_fixed, stress_config
+from ht_pdm_fjsp.passive_technician_budget_screen import _evaluate_q, _train_q_checkpoints
 from ht_pdm_fjsp.passive_technician_marl import (
     OBJECTIVE_VERSION,
     OBSERVATION_VERSION,
@@ -45,20 +30,13 @@ from ht_pdm_fjsp.passive_technician_value_decomposition import (
 )
 
 
-ALGORITHMS = (
-    "independent_q",
-    "vdn",
-    "qmix",
-    "tqmix",
-    "mappo_ctde",
-    "queue_aware_counterfactual",
-)
+ALGORITHMS = ("independent_q", "vdn", "qmix", "tqmix")
 VALUE_ALGORITHMS = ("independent_q", "vdn", "qmix", "tqmix")
-ACTOR_REFERENCE_ALGORITHMS = ("mappo_ctde", "queue_aware_counterfactual")
 FIXED_POLICIES = ("random_feasible", "skill_aware_fifo")
-FULL_BUDGETS = (5_000, 20_000, 50_000)
+FULL_BUDGETS = (5_000, 10_000, 20_000, 50_000)
 SMOKE_BUDGETS = (8, 16, 32)
 FIELDNAMES = (
+    "cell",
     "policy",
     "budget",
     "seed",
@@ -75,6 +53,28 @@ FIELDNAMES = (
     "action_steps",
     "request_count",
 )
+
+
+def environment_cells() -> dict[str, Any]:
+    base = stress_config()
+    return {
+        "in_distribution": base,
+        "early_failure": type(base)(
+            **{**asdict(base), "horizon": 18, "failure_age": 4, "failure_probability": 0.60}
+        ),
+        "slow_service": type(base)(
+            **{**asdict(base), "horizon": 18, "service_time": ((3, 5), (5, 3), (4, 4))}
+        ),
+        "combined_pressure": type(base)(
+            **{
+                **asdict(base),
+                "horizon": 18,
+                "failure_age": 4,
+                "failure_probability": 0.60,
+                "service_time": ((3, 5), (5, 3), (4, 4)),
+            }
+        ),
+    }
 
 
 def _write_csv(rows: list[dict[str, Any]], path: Path, fieldnames: tuple[str, ...] | None = None) -> None:
@@ -107,12 +107,13 @@ def _profile(profile: str) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int,
     if profile == "smoke":
         return (11,), (101, 102, 103), SMOKE_BUDGETS
     if profile == "full":
-        return (11, 12, 13), tuple(range(101, 201)), FULL_BUDGETS
+        return tuple(range(11, 16)), tuple(range(101, 201)), FULL_BUDGETS
     raise ValueError(profile)
 
 
-def _row(row: dict[str, Any], policy: str, budget: int, train_seed: int | str) -> dict[str, Any]:
+def _row(row: dict[str, Any], cell: str, policy: str, budget: int, train_seed: int | str) -> dict[str, Any]:
     return {
+        "cell": cell,
         "policy": policy,
         "budget": budget,
         "seed": row.get("seed", ""),
@@ -137,15 +138,16 @@ def _summary(
     evaluation_seeds: tuple[int, ...],
     budgets: tuple[int, ...],
 ) -> dict[str, Any]:
-    grouped: dict[tuple[str, int, str], list[dict[str, Any]]] = {}
+    grouped: dict[tuple[str, str, int, str], list[dict[str, Any]]] = {}
     for row in rows:
         grouped.setdefault(
-            (str(row["policy"]), int(row["budget"]), str(row["train_seed"])), []
+            (str(row["cell"]), str(row["policy"]), int(row["budget"]), str(row["train_seed"])), []
         ).append(row)
     budget_summary: list[dict[str, Any]] = []
-    for (policy, budget, train_seed), group in sorted(grouped.items()):
+    for (cell, policy, budget, train_seed), group in sorted(grouped.items()):
         budget_summary.append(
             {
+                "cell": cell,
                 "policy": policy,
                 "budget": budget,
                 "train_seed": train_seed,
@@ -162,39 +164,34 @@ def _summary(
             }
         )
     final_budget = max(budgets)
-    final = [row for row in budget_summary if int(row["budget"]) == final_budget]
-    final_by_policy: dict[str, dict[str, Any]] = {}
-    for policy in ALGORITHMS:
-        selected = [row for row in final if row["policy"] == policy]
-        if selected:
-            means = [float(row["objective_mean"]) for row in selected]
-            final_by_policy[policy] = {
-                "training_seed_count": len(means),
-                "objective_mean": statistics.fmean(means),
-                "objective_std_across_train_seeds": statistics.stdev(means) if len(means) > 1 else 0.0,
-                "training_seed_means": means,
-            }
-    for policy in FIXED_POLICIES:
-        selected = [row for row in budget_summary if row["policy"] == policy and int(row["budget"]) == 0]
-        if selected:
-            means = [float(row["objective_mean"]) for row in selected]
-            final_by_policy[policy] = {
-                "training_seed_count": len(means),
-                "objective_mean": statistics.fmean(means),
-                "objective_std_across_train_seeds": statistics.stdev(means) if len(means) > 1 else 0.0,
-                "training_seed_means": means,
-            }
+    final_by_cell_policy: dict[str, dict[str, Any]] = {}
+    for cell in environment_cells():
+        for policy in (*ALGORITHMS, *FIXED_POLICIES):
+            budget = 0 if policy in FIXED_POLICIES else final_budget
+            selected = [
+                row for row in budget_summary
+                if row["cell"] == cell and row["policy"] == policy and int(row["budget"]) == budget
+            ]
+            if selected:
+                means = [float(row["objective_mean"]) for row in selected]
+                final_by_cell_policy[f"{cell}/{policy}"] = {
+                    "cell": cell,
+                    "policy": policy,
+                    "training_seed_count": len(means),
+                    "objective_mean": statistics.fmean(means),
+                    "objective_std_across_train_seeds": statistics.stdev(means) if len(means) > 1 else 0.0,
+                    "training_seed_means": means,
+                }
     expected = (
-        len(FIXED_POLICIES) * len(evaluation_seeds)
-        + len(VALUE_ALGORITHMS) * len(train_seeds) * len(budgets) * len(evaluation_seeds)
-        + len(ACTOR_REFERENCE_ALGORITHMS) * len(train_seeds) * len(evaluation_seeds)
+        len(environment_cells()) * len(FIXED_POLICIES) * len(evaluation_seeds)
+        + len(environment_cells()) * len(VALUE_ALGORITHMS) * len(train_seeds) * len(budgets) * len(evaluation_seeds)
     )
     return {
-        "purpose": "Long budget-matched comparison for T-QMIX development.",
+        "purpose": "Stage 1 learning-curve comparison across four environment cells.",
         "primary_metric": "mean objective cost on the common evaluation panel",
         "budget_summary": budget_summary,
         "final_budget": final_budget,
-        "final_by_policy": final_by_policy,
+        "final_by_cell_policy": final_by_cell_policy,
         "audits": {
             "expected_episode_count": expected,
             "episode_count": len(rows),
@@ -221,14 +218,12 @@ def _evaluate(
         return _evaluate_q(config, policy, seed, train_seed)
     if policy_name == "vdn" or policy_name == "qmix" or policy_name == "tqmix":
         return evaluate_value_decomposition(config, policy, seed, train_seed, device)
-    if policy_name == "mappo_ctde":
-        return _evaluate_centralized_ppo(config, policy, seed, train_seed, device)
-    return evaluate_queue_aware_counterfactual(config, policy, seed, train_seed, device)
+    raise ValueError(f"unknown policy {policy_name}")
 
 
 def run(args: argparse.Namespace) -> Path:
     train_seeds, evaluation_seeds, budgets = _profile(args.profile)
-    config = stress_config()
+    cells = environment_cells()
     if args.device == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
@@ -240,7 +235,6 @@ def run(args: argparse.Namespace) -> Path:
         raise FileExistsError(output)
     output.mkdir(parents=True, exist_ok=True)
     max_budget = max(budgets)
-    ppo_settings = PPOSettings(episodes=max_budget)
     value_settings = ValueTrainSettings(episodes=max_budget)
     manifest = {
         "status": "RUNNING",
@@ -248,13 +242,12 @@ def run(args: argparse.Namespace) -> Path:
         "profile": args.profile,
         "algorithms": list(ALGORITHMS),
         "fixed_policies": list(FIXED_POLICIES),
-        "value_learning_curves": list(budgets),
-        "actor_reference_budget": max_budget,
+        "environment_cells": {name: asdict(config) for name, config in cells.items()},
+        "checkpoint_budgets": list(budgets),
         "train_seeds": list(train_seeds),
         "evaluation_seeds": list(evaluation_seeds),
-        "hypothesis": "Technician-aware queue-conditioned value decomposition will outperform independent Q and actor-critic references at the long budget.",
-        "stress_config": asdict(config),
-        "ppo_settings": asdict(ppo_settings),
+        "sealed_test_seeds": list(range(201, 301)),
+        "hypothesis": "RA-QMIX will achieve lower mean objective cost than independent Q-learning, VDN, and standard QMIX as training budget increases, consistently across the four locked environment cells.",
         "value_settings": asdict(value_settings),
         "objective_version": OBJECTIVE_VERSION,
         "observation_version": OBSERVATION_VERSION,
@@ -267,7 +260,7 @@ def run(args: argparse.Namespace) -> Path:
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     (output / "benchmark_config.json").write_text(
         json.dumps(
-            {"stress_config": asdict(config), "train_seeds": train_seeds, "evaluation_seeds": evaluation_seeds, "budgets": budgets, "actor_reference_budget": max_budget, "ppo_settings": asdict(ppo_settings), "value_settings": asdict(value_settings)},
+            {"environment_cells": {name: asdict(config) for name, config in cells.items()}, "train_seeds": train_seeds, "evaluation_seeds": evaluation_seeds, "sealed_test_seeds": tuple(range(201, 301)), "budgets": budgets, "value_settings": asdict(value_settings)},
             indent=2,
             sort_keys=True,
         )
@@ -275,64 +268,37 @@ def run(args: argparse.Namespace) -> Path:
     )
     rows: list[dict[str, Any]] = []
     progress: list[dict[str, Any]] = []
-    for seed in tqdm(evaluation_seeds, desc="fixed policies", unit="episode"):
-        for policy in FIXED_POLICIES:
-            rows.append(_row(evaluate_fixed(config, policy, seed), policy, 0, ""))
+    for cell_name, config in cells.items():
+        for seed in tqdm(evaluation_seeds, desc=f"fixed policies/{cell_name}", unit="episode"):
+            for policy in FIXED_POLICIES:
+                rows.append(_row(evaluate_fixed(config, policy, seed), cell_name, policy, 0, ""))
     _write_csv(rows, output / "episodes.partial.csv", FIELDNAMES)
 
-    for algorithm in VALUE_ALGORITHMS:
-        for train_seed in tqdm(train_seeds, desc=algorithm, unit="seed"):
-            root = output / algorithm / f"train_seed_{train_seed}"
-            if algorithm == "independent_q":
-                checkpoints, training_rows = _train_q_checkpoints(config, train_seed, budgets, root)
-            else:
-                checkpoints, training_rows = train_value_decomposition_checkpoints(
-                    config, algorithm, train_seed, budgets, root, value_settings, device
-                )
-            progress.extend(training_rows)
-            for budget in budgets:
-                checkpoint = checkpoints[budget]
+    for cell_name, config in cells.items():
+        for algorithm in VALUE_ALGORITHMS:
+            for train_seed in tqdm(train_seeds, desc=f"{cell_name}/{algorithm}", unit="seed"):
+                root = output / cell_name / algorithm / f"train_seed_{train_seed}"
                 if algorithm == "independent_q":
-                    policy = IndependentQ.load(checkpoint, config, seed=train_seed)
+                    checkpoints, training_rows = _train_q_checkpoints(config, train_seed, budgets, root)
                 else:
-                    policy = PassiveValueDecomposition.load(checkpoint, config, device)
-                for seed in tqdm(
-                    evaluation_seeds,
-                    desc=f"evaluate {algorithm}/{train_seed}/{budget}",
-                    unit="episode",
-                    leave=False,
-                ):
-                    rows.append(_row(_evaluate(algorithm, config, policy, seed, train_seed, device), algorithm, budget, train_seed))
-                _write_csv(rows, output / "episodes.partial.csv", FIELDNAMES)
-
-    for algorithm in ACTOR_REFERENCE_ALGORITHMS:
-        for train_seed in tqdm(train_seeds, desc=algorithm, unit="seed"):
-            root = output / algorithm / f"train_seed_{train_seed}"
-            if algorithm == "mappo_ctde":
-                checkpoints, training_rows = _train_centralized_ppo_checkpoints(
-                    config, train_seed, (max_budget,), root, ppo_settings, device
-                )
-                checkpoint = checkpoints[max_budget]
-                policy = load_centralized_ppo(config, checkpoint).to(device)
-            else:
-                checkpoint, training_rows = train_queue_aware_counterfactual(
-                    config,
-                    train_seed,
-                    max_budget,
-                    root / f"budget_{max_budget}" / "model.pt",
-                    ppo_settings,
-                    device,
-                )
-                policy = QueueAwareCounterfactualPolicy.load(checkpoint, config, device)
-            progress.extend({**row, "policy": algorithm} for row in training_rows)
-            for seed in tqdm(
-                evaluation_seeds,
-                desc=f"evaluate {algorithm}/{train_seed}/{max_budget}",
-                unit="episode",
-                leave=False,
-            ):
-                rows.append(_row(_evaluate(algorithm, config, policy, seed, train_seed, device), algorithm, max_budget, train_seed))
-            _write_csv(rows, output / "episodes.partial.csv", FIELDNAMES)
+                    checkpoints, training_rows = train_value_decomposition_checkpoints(
+                        config, algorithm, train_seed, budgets, root, value_settings, device
+                    )
+                progress.extend({**row, "cell": cell_name, "policy": algorithm} for row in training_rows)
+                for budget in budgets:
+                    checkpoint = checkpoints[budget]
+                    if algorithm == "independent_q":
+                        policy = IndependentQ.load(checkpoint, config, seed=train_seed)
+                    else:
+                        policy = PassiveValueDecomposition.load(checkpoint, config, device)
+                    for seed in tqdm(
+                        evaluation_seeds,
+                        desc=f"evaluate {cell_name}/{algorithm}/{train_seed}/{budget}",
+                        unit="episode",
+                        leave=False,
+                    ):
+                        rows.append(_row(_evaluate(algorithm, config, policy, seed, train_seed, device), cell_name, algorithm, budget, train_seed))
+                    _write_csv(rows, output / "episodes.partial.csv", FIELDNAMES)
 
     _write_csv(rows, output / "episodes.csv", FIELDNAMES)
     _write_csv(rows, output / "coordination.csv", FIELDNAMES)
