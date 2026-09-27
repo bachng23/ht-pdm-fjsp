@@ -132,6 +132,17 @@ def _write_csv(
         writer.writerows(rows)
 
 
+def _append_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    write_header = not path.exists()
+    with path.open("a", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        if write_header:
+            writer.writeheader()
+        writer.writerows(rows)
+
+
 def _actions(
     model: PassiveValueDecomposition,
     env: PassiveTechnicianEnv,
@@ -519,8 +530,11 @@ def run(args: argparse.Namespace) -> Path:
         _write_csv(output / "parameter_counts.csv", parameter_rows)
 
         episode_rows: list[dict[str, Any]] = []
-        training_rows: list[dict[str, Any]] = []
         checkpoint_paths: list[str] = []
+        optimizer_updates = {
+            (algorithm, seed): 0 for algorithm in ALGORITHMS for seed in train_seeds
+        }
+        losses_finite = True
         for algorithm in ALGORITHMS:
             for train_seed in tqdm(train_seeds, desc=f"train seeds/{algorithm}", unit="seed"):
                 root = output / algorithm / f"train_seed_{train_seed}" / "checkpoints"
@@ -533,10 +547,18 @@ def run(args: argparse.Namespace) -> Path:
                     settings,
                     device,
                 )
-                for row in progress:
-                    training_rows.append({"algorithm": algorithm, **row})
-                _write_csv(output / "training_progress.csv", training_rows)
-                _write_csv(output / "training_episodes.csv", training_rows)
+                trajectory_rows = [{"algorithm": algorithm, **row} for row in progress]
+                _append_csv(output / "training_progress.csv", trajectory_rows)
+                _append_csv(output / "training_episodes.csv", trajectory_rows)
+                optimizer_updates[algorithm, train_seed] = sum(
+                    int(row["update_count"]) for row in trajectory_rows
+                )
+                losses_finite = losses_finite and all(
+                    math.isfinite(float(row[name]))
+                    for row in trajectory_rows
+                    for name in ("td_loss", "raw_cf_loss", "weighted_cf_loss", "total_loss")
+                    if row.get(name) is not None
+                )
                 for budget in budgets:
                     checkpoint = checkpoints[budget]
                     checkpoint_paths.append(str(checkpoint.relative_to(output)))
@@ -593,21 +615,6 @@ def run(args: argparse.Namespace) -> Path:
             )
             for row in episode_rows
         ]
-        loss_values = [
-            float(row[name])
-            for row in training_rows
-            for name in ("td_loss", "raw_cf_loss", "weighted_cf_loss", "total_loss")
-            if row.get(name) is not None
-        ]
-        optimizer_updates = {
-            (algorithm, seed): sum(
-                int(row["update_count"])
-                for row in training_rows
-                if row["algorithm"] == algorithm and int(row["train_seed"]) == seed
-            )
-            for algorithm in ALGORITHMS
-            for seed in train_seeds
-        }
         audits = {
             "expected_evaluation_rows": expected_rows,
             "actual_evaluation_rows": len(episode_rows),
@@ -618,7 +625,7 @@ def run(args: argparse.Namespace) -> Path:
             "all_checkpoints_present": len(checkpoint_paths) == expected_checkpoints,
             "training_trajectory_count": len(optimizer_updates),
             "all_trajectories_updated": all(value > 0 for value in optimizer_updates.values()),
-            "losses_finite": all(math.isfinite(value) for value in loss_values),
+            "losses_finite": losses_finite,
             "cost_reconciliation_passed": all(row["cost_reconciled"] for row in coordination_rows),
             "resource_semantics_passed": all(row["resource_semantics_valid"] for row in coordination_rows),
             "sealed_test_panel_closed": not any(int(row["eval_seed"]) in SEALED_TEST_SEEDS for row in episode_rows),
