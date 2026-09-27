@@ -25,8 +25,24 @@ VALUE_ALGORITHMS = (
     "qmix_edge",
     "qmix_queue",
     "qmix_counterfactual",
+    "tqmix_no_edge",
+    "tqmix_no_queue",
+    "tqmix_no_cf",
     "tqmix",
 )
+
+
+COMPONENT_FLAGS = {
+    "vdn": (False, False, False),
+    "qmix": (False, False, False),
+    "qmix_edge": (True, False, False),
+    "qmix_queue": (False, True, False),
+    "qmix_counterfactual": (False, False, True),
+    "tqmix_no_edge": (False, True, True),
+    "tqmix_no_queue": (True, False, True),
+    "tqmix_no_cf": (True, True, False),
+    "tqmix": (True, True, True),
+}
 
 
 @dataclass(frozen=True)
@@ -45,6 +61,7 @@ class ValueTrainSettings:
     epsilon_start: float = 1.0
     epsilon_end: float = 0.05
     epsilon_fraction: float = 0.8
+    lambda_cf: float = 0.05
 
 
 class TechnicianEdgeQ(nn.Module):
@@ -165,9 +182,11 @@ class PassiveValueDecomposition(nn.Module):
         if algorithm not in VALUE_ALGORITHMS:
             raise ValueError(algorithm)
         self.algorithm = algorithm
-        self.use_edge_q = algorithm in {"qmix_edge", "tqmix"}
-        self.use_queue_mixer = algorithm in {"qmix_queue", "tqmix"}
-        self.use_counterfactual = algorithm in {"qmix_counterfactual", "tqmix"}
+        (
+            self.use_edge_q,
+            self.use_queue_mixer,
+            self.use_counterfactual,
+        ) = COMPONENT_FLAGS[algorithm]
         self.machines = config.machines
         self.observation_dim = config.observation_dim
         self.action_dim = config.technicians + 1
@@ -232,7 +251,12 @@ class PassiveValueDecomposition(nn.Module):
                 losses.append((local_delta[alternative_valid] - joint_delta[alternative_valid].detach()).pow(2).mean())
         return torch.stack(losses).mean() if losses else torch.zeros((), device=local.device)
 
-    def save(self, path: Path, seed: int) -> None:
+    def save(
+        self,
+        path: Path,
+        seed: int,
+        settings: ValueTrainSettings | None = None,
+    ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
@@ -243,6 +267,12 @@ class PassiveValueDecomposition(nn.Module):
                 "action_dim": self.action_dim,
                 "hidden_dim": self.hidden_dim,
                 "mixer_hidden_dim": self.mixer_hidden_dim,
+                "component_flags": {
+                    "edge_utilities": self.use_edge_q,
+                    "queue_mixer": self.use_queue_mixer,
+                    "counterfactual_loss": self.use_counterfactual,
+                },
+                "settings": asdict(settings) if settings is not None else None,
                 "seed": seed,
             },
             path,
@@ -258,8 +288,14 @@ class PassiveValueDecomposition(nn.Module):
             int(payload["mixer_hidden_dim"]),
         ).to(device)
         model.load_state_dict(payload["state_dict"])
+        model.checkpoint_settings = payload.get("settings")
         model.eval()
         return model
+
+    def parameter_counts(self) -> dict[str, int]:
+        agent = sum(parameter.numel() for parameter in self.agent.parameters() if parameter.requires_grad)
+        mixer = sum(parameter.numel() for parameter in self.mixer.parameters() if parameter.requires_grad)
+        return {"agent_parameters": agent, "mixer_parameters": mixer, "total_parameters": agent + mixer}
 
 
 class ReplayBuffer:
@@ -350,7 +386,11 @@ def train_value_decomposition_checkpoints(
         observations = env.reset()
         done = False
         episode_objective = 0.0
-        losses: list[float] = []
+        total_losses: list[float] = []
+        td_losses: list[float] = []
+        raw_cf_losses: list[float] = []
+        weighted_cf_losses: list[float] = []
+        episode_updates = 0
         while not done:
             local = _obs_tensor(observations, config).numpy()
             masks = np.asarray(env.action_masks(), dtype=np.bool_)
@@ -396,12 +436,22 @@ def train_value_decomposition_checkpoints(
                         target_q = torch.as_tensor(batch["rewards"], dtype=torch.float32, device=device) + settings.gamma * (~torch.as_tensor(batch["dones"], dtype=torch.bool, device=device)).float() * next_q
                     td_loss = (chosen_q - target_q).pow(2).mean()
                     consistency = online.local_edge_consistency(batch_local, batch_actions, batch_masks)
-                    loss = td_loss + (0.05 * consistency if online.use_counterfactual else 0.0)
+                    weighted_consistency = (
+                        settings.lambda_cf * consistency
+                        if online.use_counterfactual
+                        else torch.zeros((), device=device)
+                    )
+                    loss = td_loss + weighted_consistency
                     optimizer.zero_grad()
                     loss.backward()
                     nn.utils.clip_grad_norm_(online.parameters(), 5.0)
                     optimizer.step()
-                    losses.append(float(loss.detach().cpu()))
+                    td_losses.append(float(td_loss.detach().cpu()))
+                    if online.use_counterfactual:
+                        raw_cf_losses.append(float(consistency.detach().cpu()))
+                    weighted_cf_losses.append(float(weighted_consistency.detach().cpu()))
+                    total_losses.append(float(loss.detach().cpu()))
+                    episode_updates += 1
                 if global_step % settings.target_update_interval == 0:
                     target.load_state_dict(online.state_dict())
         progress.append(
@@ -409,14 +459,29 @@ def train_value_decomposition_checkpoints(
                 "policy": algorithm,
                 "train_seed": seed,
                 "episode": episode,
+                "environment_steps": global_step,
+                "update_count": episode_updates,
                 "objective": episode_objective,
-                "loss": float(np.mean(losses)) if losses else 0.0,
+                "td_loss": float(np.mean(td_losses)) if td_losses else None,
+                "raw_cf_loss": (
+                    float(np.mean(raw_cf_losses))
+                    if raw_cf_losses
+                    else None
+                ),
+                "weighted_cf_loss": (
+                    float(np.mean(weighted_cf_losses))
+                    if weighted_cf_losses
+                    else 0.0
+                ),
+                "total_loss": float(np.mean(total_losses)) if total_losses else None,
+                "loss": float(np.mean(total_losses)) if total_losses else 0.0,
                 "epsilon": epsilon,
+                **env.metrics,
             }
         )
         if episode in targets:
             path = root / f"budget_{episode}" / "model.pt"
-            online.save(path, seed)
+            online.save(path, seed, settings)
             checkpoints[episode] = path
     return checkpoints, progress
 
