@@ -26,7 +26,7 @@ from ht_pdm_fjsp.passive_technician_value_decomposition import (
 
 def test_protocol_and_leave_one_out_mapping_are_locked() -> None:
     train_seeds, evaluation_seeds, budgets, settings = profile_settings("full")
-    assert train_seeds == (11, 12, 13)
+    assert train_seeds == (11, 12, 13, 14, 15)
     assert evaluation_seeds == tuple(range(101, 201))
     assert budgets == (20_000, 50_000)
     assert settings.lambda_cf == 0.05

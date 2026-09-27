@@ -91,7 +91,7 @@ def profile_settings(
     if profile == "full":
         budgets = FULL_BUDGETS
         return (
-            (11, 12, 13),
+            (11, 12, 13, 14, 15),
             tuple(range(101, 201)),
             budgets,
             ValueTrainSettings(episodes=max(budgets)),

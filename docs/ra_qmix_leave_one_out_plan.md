@@ -9,6 +9,13 @@
 - Version Label: ra_qmix_leave_one_out_v1
 - Trạng thái: protocol đề xuất; khóa cấu hình và commit trước full run.
 
+### Protocol amendment 2026-09-27 — training-seed replication
+
+Trước khi xem kết quả full run, số training seeds được tăng từ 3 lên 5
+(`11–15`) để giảm độ bất định giữa các lần train. Mọi thành phần khác của
+protocol được giữ nguyên. Đây là amendment prospective, không được quyết định
+dựa trên kết quả performance của full run.
+
 ## 1. Mục tiêu và phạm vi
 
 Đáp ứng ưu tiên 1 trong email của thầy: xác định đóng góp của technician-edge
@@ -100,7 +107,7 @@ cost/timestep như metric phụ và ghi rõ mẫu số.
 
 | Hạng mục | Full development run | Smoke trên Mac |
 |---|---|---|
-| Training seeds | 11, 12, 13 | 11 |
+| Training seeds | 11, 12, 13, 14, 15 | 11 |
 | Evaluation seeds | 101–200 | 101–103 |
 | Sealed test seeds dự kiến | 201–300, không chạy | Không chạy |
 | Checkpoints | 20,000 và 50,000 episodes | 8 và 16 episodes |
@@ -122,20 +129,20 @@ cost/timestep như metric phụ và ghi rõ mẫu số.
 - Run lỗi được ghi `FAILED`/`INCOMPLETE`; không loại seed xấu để cải thiện mean.
   Nếu cần chạy lại sau sửa lỗi, tạo run mới, giữ artifacts cũ và giải thích lý do.
 
-Quy mô dự kiến: 15 training trajectories, 750,000 training episodes, 30
-checkpoints và 12,000 evaluation episodes. Smoke: 5 trajectories, 80 training
+Quy mô dự kiến: 25 training trajectories, 1,250,000 training episodes, 50
+checkpoints và 20,000 evaluation episodes. Smoke: 5 trajectories, 80 training
 episodes, 10 checkpoints và 120 evaluation episodes. Không thêm fixed policies
 vào số đếm của runner này.
 
-Ba training seeds là vòng diagnostic ban đầu, chưa đủ cơ sở để khẳng định độ
-ổn định rộng. Không coi 100 evaluation episodes là 100 lần train độc lập.
+Năm training seeds vẫn là vòng development có quy mô vừa phải; báo cáo đầy đủ
+độ biến thiên và không coi 100 evaluation episodes là 100 lần train độc lập.
 
 ## 6. Metrics và định nghĩa logging
 
 ### Primary metric
 
 Mean objective cost trên evaluation seeds 101–200, tính riêng cho từng training
-seed tại nominal/50k. Báo cáo cả ba seed means, mean và SD giữa training seeds.
+seed tại nominal/50k. Báo cáo cả năm seed means, mean và SD giữa training seeds.
 
 ### Secondary và mechanism metrics
 
@@ -168,12 +175,12 @@ Yêu cầu định nghĩa trước full run:
 
 1. Kiểm tra completeness, schema, seed split và feasibility trước performance.
 2. Với mỗi training seed, lấy trung bình trên cùng 100 evaluation seeds.
-3. Tính paired delta giữa từng ablation và Full tại nominal/50k; báo cáo ba
+3. Tính paired delta giữa từng ablation và Full tại nominal/50k; báo cáo năm
    delta theo seed, mean delta, SD và khoảng min–max.
 4. Báo cáo thêm delta Full so với QMIX. Nếu đưa relative delta (%), ghi rõ mẫu
    số là cost của Full cho ablation, cost QMIX cho so sánh baseline.
-5. Vòng 3 seeds ưu tiên mô tả effect và độ biến thiên; không dùng p-value hoặc
-   interval tính từ việc gộp 300 episodes như các independent training runs.
+5. Vòng 5 seeds ưu tiên mô tả effect và độ biến thiên; không dùng p-value hoặc
+   interval tính từ việc gộp 500 episodes như các independent training runs.
 6. Lập bảng tương tự cho từng stress scenario và checkpoint 20k; ghi rõ là
    secondary/exploratory. Không thay endpoint chính theo kết quả.
 7. Đối chiếu cost decomposition với failures, queue waiting và utilization để
@@ -223,7 +230,7 @@ variant thực hiện ít nhất một optimizer update (smoke cần giảm lear
 và batch size phù hợp, ghi rõ override); losses hữu hạn; save/load đạt; schema
 và feasibility audits đạt; có `tqdm` cho training và multi-seed evaluation.
 
-Full gate: đủ 12,000 evaluation rows, 30 checkpoints và 15 trajectories; không
+Full gate: đủ 20,000 evaluation rows, 50 checkpoints và 25 trajectories; không
 duplicate keys; dữ liệu loss hữu hạn; cost reconciliation đạt sai số float đã
 định trước (đề xuất absolute tolerance 1e-6); không có vi phạm resource semantics.
 Busy requests/collisions phải được phân biệt với vi phạm feasibility vì có thể
