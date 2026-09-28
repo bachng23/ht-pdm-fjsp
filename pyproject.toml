@@ -71,6 +71,7 @@ ht-pdm-fjsp-passive-long-comparison = "ht_pdm_fjsp.passive_technician_long_compa
 ht-pdm-fjsp-passive-ablation = "ht_pdm_fjsp.passive_technician_ablation:main"
 ht-pdm-fjsp-ra-qmix-leave-one-out = "ht_pdm_fjsp.passive_technician_leave_one_out:main"
 ht-pdm-fjsp-ra-qmix-stress-sweep = "ht_pdm_fjsp.passive_technician_stress_checkpoint_sweep:main"
+ht-pdm-fjsp-ra-qmix-robust-holdout = "ht_pdm_fjsp.passive_technician_robust_checkpoint_holdout:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
