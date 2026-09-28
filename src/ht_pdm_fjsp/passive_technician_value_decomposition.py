@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -483,6 +483,228 @@ def train_value_decomposition_checkpoints(
             path = root / f"budget_{episode}" / "model.pt"
             online.save(path, seed, settings)
             checkpoints[episode] = path
+    return checkpoints, progress
+
+
+def train_value_decomposition_step_checkpoints(
+    config: PassiveConfig,
+    algorithm: str,
+    seed: int,
+    step_budgets: tuple[int, ...],
+    root: Path,
+    settings: ValueTrainSettings,
+    device: torch.device,
+    training_cells: Mapping[str, PassiveConfig],
+    episode_scenarios: Sequence[str],
+) -> tuple[dict[int, Path], list[dict[str, Any]]]:
+    """Train to exact environment-step checkpoints under a fixed scenario schedule."""
+    if not step_budgets or tuple(sorted(set(step_budgets))) != step_budgets:
+        raise ValueError("step_budgets must be positive, sorted, and unique")
+    if step_budgets[0] <= 0:
+        raise ValueError("step_budgets must be positive")
+    if not episode_scenarios:
+        raise ValueError("episode_scenarios cannot be empty")
+    unknown = sorted(set(episode_scenarios) - set(training_cells))
+    if unknown:
+        raise ValueError(f"unknown training scenarios: {unknown}")
+    for name, cell in training_cells.items():
+        if (
+            cell.machines != config.machines
+            or cell.technicians != config.technicians
+            or cell.observation_dim != config.observation_dim
+        ):
+            raise ValueError(f"training cell {name} has incompatible dimensions")
+    scheduled_steps = sum(training_cells[name].horizon for name in episode_scenarios)
+    if scheduled_steps < max(step_budgets):
+        raise ValueError(
+            f"scenario schedule has {scheduled_steps} steps, below {max(step_budgets)}"
+        )
+
+    torch.manual_seed(seed)
+    random.seed(seed)
+    rng = np.random.default_rng(seed)
+    online = PassiveValueDecomposition(
+        config, algorithm, settings.hidden_dim, settings.mixer_hidden_dim
+    ).to(device)
+    target = PassiveValueDecomposition(
+        config, algorithm, settings.hidden_dim, settings.mixer_hidden_dim
+    ).to(device)
+    target.load_state_dict(online.state_dict())
+    target.eval()
+    optimizer = torch.optim.Adam(online.parameters(), lr=settings.learning_rate)
+    replay = ReplayBuffer(
+        settings.replay_capacity,
+        config.machines,
+        config.observation_dim,
+        config.technicians + 1,
+    )
+    checkpoints: dict[int, Path] = {}
+    progress: list[dict[str, Any]] = []
+    targets = set(step_budgets)
+    maximum_steps = max(step_budgets)
+    global_step = 0
+
+    for episode, scenario in enumerate(
+        tqdm(
+            episode_scenarios,
+            desc=f"{algorithm} {seed}",
+            unit="episode",
+            leave=False,
+        ),
+        start=1,
+    ):
+        episode_config = training_cells[scenario]
+        env = PassiveTechnicianEnv(
+            episode_config, seed=seed * 100_000 + episode - 1
+        )
+        observations = env.reset()
+        done = False
+        episode_objective = 0.0
+        total_losses: list[float] = []
+        td_losses: list[float] = []
+        raw_cf_losses: list[float] = []
+        weighted_cf_losses: list[float] = []
+        episode_updates = 0
+        while not done:
+            local = _obs_tensor(observations, episode_config).numpy()
+            masks = np.asarray(env.action_masks(), dtype=np.bool_)
+            epsilon = max(
+                settings.epsilon_end,
+                settings.epsilon_start
+                - (settings.epsilon_start - settings.epsilon_end)
+                * global_step
+                / max(1, int(maximum_steps * settings.epsilon_fraction)),
+            )
+            with torch.no_grad():
+                local_tensor = torch.as_tensor(
+                    local, dtype=torch.float32, device=device
+                ).unsqueeze(0)
+                q_values = online.agent_q(local_tensor)[0].masked_fill(
+                    ~torch.as_tensor(masks, dtype=torch.bool, device=device), -1e9
+                )
+                greedy = q_values.argmax(dim=-1).cpu().tolist()
+            actions = tuple(
+                int(rng.choice(np.flatnonzero(masks[machine])))
+                if rng.random() < epsilon
+                else int(greedy[machine])
+                for machine in range(episode_config.machines)
+            )
+            next_observations, reward, done, _ = env.step(actions)
+            next_local = _obs_tensor(next_observations, episode_config).numpy()
+            next_masks = np.asarray(env.action_masks(), dtype=np.bool_)
+            replay.add(
+                local,
+                masks,
+                actions,
+                float(reward),
+                next_local,
+                next_masks,
+                done,
+            )
+            observations = next_observations
+            episode_objective += -float(reward)
+            global_step += 1
+            if (
+                replay.size >= settings.learning_starts
+                and global_step % settings.train_frequency == 0
+            ):
+                for _ in range(settings.gradient_steps):
+                    batch = replay.sample(settings.batch_size, rng)
+                    batch_local = torch.as_tensor(
+                        batch["local"], dtype=torch.float32, device=device
+                    )
+                    batch_masks = torch.as_tensor(
+                        batch["masks"], dtype=torch.bool, device=device
+                    )
+                    batch_actions = torch.as_tensor(
+                        batch["actions"], dtype=torch.long, device=device
+                    )
+                    batch_next_local = torch.as_tensor(
+                        batch["next_local"], dtype=torch.float32, device=device
+                    )
+                    batch_next_masks = torch.as_tensor(
+                        batch["next_masks"], dtype=torch.bool, device=device
+                    )
+                    chosen_q = online.total_q(batch_local, batch_actions)
+                    with torch.no_grad():
+                        next_online = online.agent_q(batch_next_local).masked_fill(
+                            ~batch_next_masks, -1e9
+                        )
+                        next_actions = next_online.argmax(dim=-1)
+                        next_q = target.total_q(batch_next_local, next_actions)
+                        target_q = torch.as_tensor(
+                            batch["rewards"], dtype=torch.float32, device=device
+                        ) + settings.gamma * (
+                            ~torch.as_tensor(
+                                batch["dones"], dtype=torch.bool, device=device
+                            )
+                        ).float() * next_q
+                    td_loss = (chosen_q - target_q).pow(2).mean()
+                    consistency = online.local_edge_consistency(
+                        batch_local, batch_actions, batch_masks
+                    )
+                    weighted_consistency = (
+                        settings.lambda_cf * consistency
+                        if online.use_counterfactual
+                        else torch.zeros((), device=device)
+                    )
+                    loss = td_loss + weighted_consistency
+                    optimizer.zero_grad()
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(online.parameters(), 5.0)
+                    optimizer.step()
+                    td_losses.append(float(td_loss.detach().cpu()))
+                    if online.use_counterfactual:
+                        raw_cf_losses.append(float(consistency.detach().cpu()))
+                    weighted_cf_losses.append(
+                        float(weighted_consistency.detach().cpu())
+                    )
+                    total_losses.append(float(loss.detach().cpu()))
+                    episode_updates += 1
+                if global_step % settings.target_update_interval == 0:
+                    target.load_state_dict(online.state_dict())
+            if global_step in targets:
+                if not done:
+                    raise RuntimeError(
+                        f"step checkpoint {global_step} is not an episode boundary"
+                    )
+                path = root / f"step_{global_step}" / "model.pt"
+                online.save(path, seed, settings)
+                checkpoints[global_step] = path
+
+        progress.append(
+            {
+                "policy": algorithm,
+                "train_seed": seed,
+                "training_scenario": scenario,
+                "episode": episode,
+                "environment_steps": global_step,
+                "update_count": episode_updates,
+                "objective": episode_objective,
+                "td_loss": float(np.mean(td_losses)) if td_losses else None,
+                "raw_cf_loss": (
+                    float(np.mean(raw_cf_losses)) if raw_cf_losses else None
+                ),
+                "weighted_cf_loss": (
+                    float(np.mean(weighted_cf_losses))
+                    if weighted_cf_losses
+                    else 0.0
+                ),
+                "total_loss": (
+                    float(np.mean(total_losses)) if total_losses else None
+                ),
+                "loss": float(np.mean(total_losses)) if total_losses else 0.0,
+                "epsilon": epsilon,
+                **env.metrics,
+            }
+        )
+        if global_step >= maximum_steps:
+            break
+
+    if set(checkpoints) != targets or global_step != maximum_steps:
+        raise RuntimeError(
+            f"step training incomplete: steps={global_step}, checkpoints={sorted(checkpoints)}"
+        )
     return checkpoints, progress
 
 
