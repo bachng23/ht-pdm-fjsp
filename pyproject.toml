@@ -53,6 +53,7 @@ ht-pdm-fjsp-technician-capacity = "ht_pdm_fjsp.technician_capacity_screening:mai
 ht-pdm-fjsp-three-way-marl = "ht_pdm_fjsp.three_way_marl_experiment:main"
 ht-pdm-fjsp-marl-budget-screen = "ht_pdm_fjsp.marl_budget_screening:main"
 ht-pdm-fjsp-qmix-fidelity = "ht_pdm_fjsp.qmix_fidelity_experiment:main"
+ht-pdm-fjsp-ra-qmix-nominal-anchor = "ht_pdm_fjsp.passive_technician_nominal_anchor_calibration:main"
 ht-pdm-fjsp-resource-graph = "ht_pdm_fjsp.resource_conflict_graph_experiment:main"
 ht-pdm-fjsp-environment-attribution = "ht_pdm_fjsp.environment_attribution_experiment:main"
 ht-pdm-fjsp-qplex-soft-graph = "ht_pdm_fjsp.qplex_soft_graph_experiment:main"
