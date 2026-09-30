@@ -64,6 +64,14 @@ class ValueTrainSettings:
     lambda_cf: float = 0.05
 
 
+@dataclass(frozen=True)
+class AnchorAdaptationSettings:
+    phase_boundary_steps: int
+    nominal_batch_size: int
+    anchor_lambda: float
+    anchor_temperature: float = 1.0
+
+
 class TechnicianEdgeQ(nn.Module):
     """Q network with an explicit defer score and technician-edge scores."""
 
@@ -343,6 +351,50 @@ class ReplayBuffer:
             "next_masks": self.next_masks[indices],
             "dones": self.dones[indices],
         }
+
+    def retain_latest(self, capacity: int) -> "ReplayBuffer":
+        if capacity <= 0:
+            raise ValueError("replay capacity must be positive")
+        resized = ReplayBuffer(
+            capacity,
+            self.local.shape[1],
+            self.local.shape[2],
+            self.masks.shape[2],
+        )
+        if not self.size:
+            return resized
+        if self.size < self.capacity:
+            chronological = np.arange(self.size)
+        else:
+            chronological = (
+                self.position + np.arange(self.size)
+            ) % self.capacity
+        retained = chronological[-min(self.size, capacity) :]
+        count = len(retained)
+        for name in (
+            "local",
+            "next_local",
+            "masks",
+            "next_masks",
+            "actions",
+            "rewards",
+            "dones",
+        ):
+            getattr(resized, name)[:count] = getattr(self, name)[retained]
+        resized.size = count
+        resized.position = count % capacity
+        return resized
+
+
+def _concatenate_replay_batches(
+    batches: Sequence[dict[str, np.ndarray]],
+) -> dict[str, np.ndarray]:
+    if not batches:
+        raise ValueError("at least one replay batch is required")
+    return {
+        key: np.concatenate([batch[key] for batch in batches], axis=0)
+        for key in batches[0]
+    }
 
 
 def train_value_decomposition_checkpoints(
@@ -706,6 +758,378 @@ def train_value_decomposition_step_checkpoints(
             f"step training incomplete: steps={global_step}, checkpoints={sorted(checkpoints)}"
         )
     return checkpoints, progress
+
+
+def train_value_decomposition_anchor_checkpoints(
+    config: PassiveConfig,
+    algorithm: str,
+    seed: int,
+    step_budgets: tuple[int, ...],
+    root: Path,
+    settings: ValueTrainSettings,
+    device: torch.device,
+    training_cells: Mapping[str, PassiveConfig],
+    episode_scenarios: Sequence[str],
+    adaptation: AnchorAdaptationSettings,
+    nominal_scenario: str = "in_distribution",
+) -> tuple[dict[int, Path], list[dict[str, Any]], dict[str, Any]]:
+    """Train a nominal curriculum with stratified phase-two replay and KL anchor."""
+    if not step_budgets or tuple(sorted(set(step_budgets))) != step_budgets:
+        raise ValueError("step_budgets must be positive, sorted, and unique")
+    if step_budgets[0] <= 0:
+        raise ValueError("step_budgets must be positive")
+    if adaptation.phase_boundary_steps not in step_budgets:
+        raise ValueError("phase boundary must be a requested checkpoint")
+    if not 0 < adaptation.nominal_batch_size < settings.batch_size:
+        raise ValueError("nominal batch size must be between zero and batch size")
+    if adaptation.anchor_lambda < 0:
+        raise ValueError("anchor lambda must be non-negative")
+    if adaptation.anchor_temperature <= 0:
+        raise ValueError("anchor temperature must be positive")
+    if nominal_scenario not in training_cells:
+        raise ValueError(f"unknown nominal scenario: {nominal_scenario}")
+    if not episode_scenarios:
+        raise ValueError("episode_scenarios cannot be empty")
+    unknown = sorted(set(episode_scenarios) - set(training_cells))
+    if unknown:
+        raise ValueError(f"unknown training scenarios: {unknown}")
+    for name, cell in training_cells.items():
+        if (
+            cell.machines != config.machines
+            or cell.technicians != config.technicians
+            or cell.observation_dim != config.observation_dim
+        ):
+            raise ValueError(f"training cell {name} has incompatible dimensions")
+    scheduled_steps = sum(training_cells[name].horizon for name in episode_scenarios)
+    if scheduled_steps < max(step_budgets):
+        raise ValueError(
+            f"scenario schedule has {scheduled_steps} steps, below {max(step_budgets)}"
+        )
+
+    torch.manual_seed(seed)
+    random.seed(seed)
+    rng = np.random.default_rng(seed)
+    online = PassiveValueDecomposition(
+        config, algorithm, settings.hidden_dim, settings.mixer_hidden_dim
+    ).to(device)
+    target = PassiveValueDecomposition(
+        config, algorithm, settings.hidden_dim, settings.mixer_hidden_dim
+    ).to(device)
+    target.load_state_dict(online.state_dict())
+    target.eval()
+    optimizer = torch.optim.Adam(online.parameters(), lr=settings.learning_rate)
+    stress_capacity = (
+        settings.replay_capacity
+        * (settings.batch_size - adaptation.nominal_batch_size)
+        // settings.batch_size
+    )
+    nominal_adaptation_capacity = settings.replay_capacity - stress_capacity
+    if stress_capacity <= 0:
+        raise ValueError("stratified stress replay capacity must be positive")
+    nominal_replay = ReplayBuffer(
+        settings.replay_capacity,
+        config.machines,
+        config.observation_dim,
+        config.technicians + 1,
+    )
+    stress_replay = ReplayBuffer(
+        stress_capacity,
+        config.machines,
+        config.observation_dim,
+        config.technicians + 1,
+    )
+    teacher: PassiveValueDecomposition | None = None
+    checkpoints: dict[int, Path] = {}
+    progress: list[dict[str, Any]] = []
+    targets = set(step_budgets)
+    maximum_steps = max(step_budgets)
+    global_step = 0
+    phase_two_updates_before_stress = 0
+    phase_two_stratified_updates = 0
+    total_nominal_batch_samples = 0
+    total_stress_batch_samples = 0
+
+    for episode, scenario in enumerate(
+        tqdm(
+            episode_scenarios,
+            desc=f"{algorithm} anchor {seed}",
+            unit="episode",
+            leave=False,
+        ),
+        start=1,
+    ):
+        episode_config = training_cells[scenario]
+        env = PassiveTechnicianEnv(
+            episode_config, seed=seed * 100_000 + episode - 1
+        )
+        observations = env.reset()
+        done = False
+        episode_objective = 0.0
+        total_losses: list[float] = []
+        td_losses: list[float] = []
+        raw_cf_losses: list[float] = []
+        weighted_cf_losses: list[float] = []
+        raw_anchor_losses: list[float] = []
+        weighted_anchor_losses: list[float] = []
+        episode_updates = 0
+        episode_nominal_batch_samples = 0
+        episode_stress_batch_samples = 0
+        episode_stratified_updates = 0
+        while not done:
+            local = _obs_tensor(observations, episode_config).numpy()
+            masks = np.asarray(env.action_masks(), dtype=np.bool_)
+            epsilon = max(
+                settings.epsilon_end,
+                settings.epsilon_start
+                - (settings.epsilon_start - settings.epsilon_end)
+                * global_step
+                / max(1, int(maximum_steps * settings.epsilon_fraction)),
+            )
+            with torch.no_grad():
+                local_tensor = torch.as_tensor(
+                    local, dtype=torch.float32, device=device
+                ).unsqueeze(0)
+                q_values = online.agent_q(local_tensor)[0].masked_fill(
+                    ~torch.as_tensor(masks, dtype=torch.bool, device=device), -1e9
+                )
+                greedy = q_values.argmax(dim=-1).cpu().tolist()
+            actions = tuple(
+                int(rng.choice(np.flatnonzero(masks[machine])))
+                if rng.random() < epsilon
+                else int(greedy[machine])
+                for machine in range(episode_config.machines)
+            )
+            next_observations, reward, done, _ = env.step(actions)
+            next_local = _obs_tensor(next_observations, episode_config).numpy()
+            next_masks = np.asarray(env.action_masks(), dtype=np.bool_)
+            active_replay = (
+                nominal_replay if scenario == nominal_scenario else stress_replay
+            )
+            active_replay.add(
+                local,
+                masks,
+                actions,
+                float(reward),
+                next_local,
+                next_masks,
+                done,
+            )
+            observations = next_observations
+            episode_objective += -float(reward)
+            global_step += 1
+            if (
+                nominal_replay.size + stress_replay.size >= settings.learning_starts
+                and global_step % settings.train_frequency == 0
+            ):
+                for _ in range(settings.gradient_steps):
+                    phase_two = global_step > adaptation.phase_boundary_steps
+                    if phase_two and stress_replay.size:
+                        nominal_batch_size = adaptation.nominal_batch_size
+                        stress_batch_size = settings.batch_size - nominal_batch_size
+                        batch = _concatenate_replay_batches(
+                            (
+                                nominal_replay.sample(nominal_batch_size, rng),
+                                stress_replay.sample(stress_batch_size, rng),
+                            )
+                        )
+                        phase_two_stratified_updates += 1
+                        episode_stratified_updates += 1
+                    else:
+                        nominal_batch_size = settings.batch_size
+                        stress_batch_size = 0
+                        batch = nominal_replay.sample(settings.batch_size, rng)
+                        if phase_two:
+                            phase_two_updates_before_stress += 1
+                    episode_nominal_batch_samples += nominal_batch_size
+                    episode_stress_batch_samples += stress_batch_size
+                    total_nominal_batch_samples += nominal_batch_size
+                    total_stress_batch_samples += stress_batch_size
+
+                    batch_local = torch.as_tensor(
+                        batch["local"], dtype=torch.float32, device=device
+                    )
+                    batch_masks = torch.as_tensor(
+                        batch["masks"], dtype=torch.bool, device=device
+                    )
+                    batch_actions = torch.as_tensor(
+                        batch["actions"], dtype=torch.long, device=device
+                    )
+                    batch_next_local = torch.as_tensor(
+                        batch["next_local"], dtype=torch.float32, device=device
+                    )
+                    batch_next_masks = torch.as_tensor(
+                        batch["next_masks"], dtype=torch.bool, device=device
+                    )
+                    chosen_q = online.total_q(batch_local, batch_actions)
+                    with torch.no_grad():
+                        next_online = online.agent_q(batch_next_local).masked_fill(
+                            ~batch_next_masks, -1e9
+                        )
+                        next_actions = next_online.argmax(dim=-1)
+                        next_q = target.total_q(batch_next_local, next_actions)
+                        target_q = torch.as_tensor(
+                            batch["rewards"], dtype=torch.float32, device=device
+                        ) + settings.gamma * (
+                            ~torch.as_tensor(
+                                batch["dones"], dtype=torch.bool, device=device
+                            )
+                        ).float() * next_q
+                    td_loss = (chosen_q - target_q).pow(2).mean()
+                    consistency = online.local_edge_consistency(
+                        batch_local, batch_actions, batch_masks
+                    )
+                    weighted_consistency = (
+                        settings.lambda_cf * consistency
+                        if online.use_counterfactual
+                        else torch.zeros((), device=device)
+                    )
+                    anchor_loss = torch.zeros((), device=device)
+                    if (
+                        phase_two
+                        and teacher is not None
+                        and adaptation.anchor_lambda > 0
+                    ):
+                        nominal_local = batch_local[:nominal_batch_size]
+                        nominal_masks = batch_masks[:nominal_batch_size]
+                        temperature = adaptation.anchor_temperature
+                        with torch.no_grad():
+                            teacher_logits = teacher.agent_q(nominal_local).masked_fill(
+                                ~nominal_masks, -1e9
+                            ) / temperature
+                            teacher_probabilities = torch.softmax(
+                                teacher_logits, dim=-1
+                            )
+                            teacher_log_probabilities = torch.log_softmax(
+                                teacher_logits, dim=-1
+                            )
+                        online_log_probabilities = torch.log_softmax(
+                            online.agent_q(nominal_local).masked_fill(
+                                ~nominal_masks, -1e9
+                            )
+                            / temperature,
+                            dim=-1,
+                        )
+                        anchor_loss = (
+                            teacher_probabilities
+                            * (
+                                teacher_log_probabilities
+                                - online_log_probabilities
+                            )
+                        ).sum(dim=-1).mean() * (temperature**2)
+                    weighted_anchor = adaptation.anchor_lambda * anchor_loss
+                    loss = td_loss + weighted_consistency + weighted_anchor
+                    optimizer.zero_grad()
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(online.parameters(), 5.0)
+                    optimizer.step()
+                    td_losses.append(float(td_loss.detach().cpu()))
+                    if online.use_counterfactual:
+                        raw_cf_losses.append(float(consistency.detach().cpu()))
+                    weighted_cf_losses.append(
+                        float(weighted_consistency.detach().cpu())
+                    )
+                    raw_anchor_losses.append(float(anchor_loss.detach().cpu()))
+                    weighted_anchor_losses.append(
+                        float(weighted_anchor.detach().cpu())
+                    )
+                    total_losses.append(float(loss.detach().cpu()))
+                    episode_updates += 1
+                if global_step % settings.target_update_interval == 0:
+                    target.load_state_dict(online.state_dict())
+            if global_step in targets:
+                if not done:
+                    raise RuntimeError(
+                        f"step checkpoint {global_step} is not an episode boundary"
+                    )
+                path = root / f"step_{global_step}" / "model.pt"
+                online.save(path, seed, settings)
+                checkpoints[global_step] = path
+                if global_step == adaptation.phase_boundary_steps:
+                    nominal_replay = nominal_replay.retain_latest(
+                        nominal_adaptation_capacity
+                    )
+                    teacher = PassiveValueDecomposition(
+                        config,
+                        algorithm,
+                        settings.hidden_dim,
+                        settings.mixer_hidden_dim,
+                    ).to(device)
+                    teacher.load_state_dict(online.state_dict())
+                    teacher.eval()
+                    for parameter in teacher.parameters():
+                        parameter.requires_grad_(False)
+
+        progress.append(
+            {
+                "policy": algorithm,
+                "train_seed": seed,
+                "training_scenario": scenario,
+                "training_phase": (
+                    "nominal_pretrain"
+                    if global_step <= adaptation.phase_boundary_steps
+                    else "stress_adaptation"
+                ),
+                "episode": episode,
+                "environment_steps": global_step,
+                "update_count": episode_updates,
+                "batch_nominal_samples": episode_nominal_batch_samples,
+                "batch_stress_samples": episode_stress_batch_samples,
+                "stratified_update_count": episode_stratified_updates,
+                "objective": episode_objective,
+                "td_loss": float(np.mean(td_losses)) if td_losses else None,
+                "raw_cf_loss": (
+                    float(np.mean(raw_cf_losses)) if raw_cf_losses else None
+                ),
+                "weighted_cf_loss": (
+                    float(np.mean(weighted_cf_losses))
+                    if weighted_cf_losses
+                    else 0.0
+                ),
+                "raw_anchor_loss": (
+                    float(np.mean(raw_anchor_losses))
+                    if raw_anchor_losses
+                    else 0.0
+                ),
+                "weighted_anchor_loss": (
+                    float(np.mean(weighted_anchor_losses))
+                    if weighted_anchor_losses
+                    else 0.0
+                ),
+                "total_loss": (
+                    float(np.mean(total_losses)) if total_losses else None
+                ),
+                "loss": float(np.mean(total_losses)) if total_losses else 0.0,
+                "epsilon": epsilon,
+                **env.metrics,
+            }
+        )
+        if global_step >= maximum_steps:
+            break
+
+    if set(checkpoints) != targets or global_step != maximum_steps:
+        raise RuntimeError(
+            f"anchor training incomplete: steps={global_step}, checkpoints={sorted(checkpoints)}"
+        )
+    if teacher is None:
+        raise RuntimeError("nominal teacher was not captured at the phase boundary")
+    diagnostics = {
+        "phase_boundary_steps": adaptation.phase_boundary_steps,
+        "nominal_batch_size": adaptation.nominal_batch_size,
+        "stress_batch_size": settings.batch_size - adaptation.nominal_batch_size,
+        "anchor_lambda": adaptation.anchor_lambda,
+        "anchor_temperature": adaptation.anchor_temperature,
+        "phase_one_replay_capacity": settings.replay_capacity,
+        "phase_two_nominal_replay_capacity": nominal_replay.capacity,
+        "phase_two_stress_replay_capacity": stress_replay.capacity,
+        "phase_two_total_replay_capacity": (
+            nominal_replay.capacity + stress_replay.capacity
+        ),
+        "phase_two_updates_before_stress": phase_two_updates_before_stress,
+        "phase_two_stratified_updates": phase_two_stratified_updates,
+        "total_nominal_batch_samples": total_nominal_batch_samples,
+        "total_stress_batch_samples": total_stress_batch_samples,
+    }
+    return checkpoints, progress, diagnostics
 
 
 def evaluate_value_decomposition(
