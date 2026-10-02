@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -538,6 +539,25 @@ def train_value_decomposition_checkpoints(
     return checkpoints, progress
 
 
+def record_loss_gradients(model, td_loss, weighted_cf, records, step, seed):
+    """Observe pre-clip gradients without modifying .grad or RNG state."""
+    parameters = tuple(p for p in model.parameters() if p.requires_grad)
+    def vector(loss):
+        if not loss.requires_grad:
+            return torch.zeros(sum(p.numel() for p in parameters), device=td_loss.device)
+        gradients = torch.autograd.grad(loss, parameters, retain_graph=True, allow_unused=True)
+        return torch.cat([torch.zeros_like(p).flatten() if g is None else g.flatten()
+                          for p, g in zip(parameters, gradients, strict=True)])
+    td, cf = vector(td_loss), vector(weighted_cf)
+    td_norm, cf_norm = td.norm(), cf.norm()
+    cosine = float(torch.dot(td, cf) / (td_norm * cf_norm)) if td_norm > 0 and cf_norm > 0 else None
+    row = dict(train_seed=seed, environment_steps=step, td_gradient_norm=float(td_norm),
+               weighted_cf_gradient_norm=float(cf_norm), gradient_cosine=cosine)
+    if not all(math.isfinite(v) for v in row.values() if isinstance(v, float)):
+        raise RuntimeError("Nonfinite sampled gradients")
+    records.append(row)
+
+
 def train_value_decomposition_step_checkpoints(
     config: PassiveConfig,
     algorithm: str,
@@ -548,6 +568,8 @@ def train_value_decomposition_step_checkpoints(
     device: torch.device,
     training_cells: Mapping[str, PassiveConfig],
     episode_scenarios: Sequence[str],
+    *, gradient_diagnostic_interval: int = 0,
+    gradient_records: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[int, Path], list[dict[str, Any]]]:
     """Train to exact environment-step checkpoints under a fixed scenario schedule."""
     if not step_budgets or tuple(sorted(set(step_budgets))) != step_budgets:
@@ -701,6 +723,8 @@ def train_value_decomposition_step_checkpoints(
                         else torch.zeros((), device=device)
                     )
                     loss = td_loss + weighted_consistency
+                    if gradient_records is not None and gradient_diagnostic_interval > 0 and global_step % gradient_diagnostic_interval == 0:
+                        record_loss_gradients(online, td_loss, weighted_consistency, gradient_records, global_step, seed)
                     optimizer.zero_grad()
                     loss.backward()
                     nn.utils.clip_grad_norm_(online.parameters(), 5.0)
@@ -772,6 +796,8 @@ def train_value_decomposition_anchor_checkpoints(
     episode_scenarios: Sequence[str],
     adaptation: AnchorAdaptationSettings,
     nominal_scenario: str = "in_distribution",
+    *, gradient_diagnostic_interval: int = 0,
+    gradient_records: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[int, Path], list[dict[str, Any]], dict[str, Any]]:
     """Train a nominal curriculum with stratified phase-two replay and KL anchor."""
     if not step_budgets or tuple(sorted(set(step_budgets))) != step_budgets:
@@ -1018,6 +1044,8 @@ def train_value_decomposition_anchor_checkpoints(
                         ).sum(dim=-1).mean() * (temperature**2)
                     weighted_anchor = adaptation.anchor_lambda * anchor_loss
                     loss = td_loss + weighted_consistency + weighted_anchor
+                    if gradient_records is not None and gradient_diagnostic_interval > 0 and global_step % gradient_diagnostic_interval == 0:
+                        record_loss_gradients(online, td_loss, weighted_consistency, gradient_records, global_step, seed)
                     optimizer.zero_grad()
                     loss.backward()
                     nn.utils.clip_grad_norm_(online.parameters(), 5.0)

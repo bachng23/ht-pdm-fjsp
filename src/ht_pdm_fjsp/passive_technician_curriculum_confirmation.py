@@ -334,7 +334,10 @@ def confirmation_results(
     return rows, decision
 
 
-def run(args: argparse.Namespace) -> Path:
+def run(args: argparse.Namespace, *, algorithm: str = ALGORITHM,
+        profile_override: tuple | None = None, protocol_version: str = PROTOCOL_VERSION,
+        prior_used_seeds: frozenset[int] = PRIOR_USED_SEEDS,
+        gradient_diagnostic_interval: int = 0) -> Path:
     (
         train_seeds,
         evaluation_seeds,
@@ -342,12 +345,10 @@ def run(args: argparse.Namespace) -> Path:
         phase_boundary_steps,
         settings,
         nominal_batch_size,
-    ) = profile_settings(args.profile)
+    ) = profile_override if profile_override is not None else profile_settings(args.profile)
     panels = (
-        set(FULL_TRAIN_SEEDS),
-        set(FULL_EVALUATION_SEEDS),
-        set(SMOKE_TRAIN_SEEDS),
-        set(SMOKE_EVALUATION_SEEDS),
+        set(train_seeds),
+        set(evaluation_seeds),
         set(SEALED_TEST_SEEDS),
     )
     if any(
@@ -358,7 +359,7 @@ def run(args: argparse.Namespace) -> Path:
         raise ValueError(
             "training, evaluation, smoke, and sealed panels must be disjoint"
         )
-    if (set(train_seeds) | set(evaluation_seeds)) & PRIOR_USED_SEEDS:
+    if (set(train_seeds) | set(evaluation_seeds)) & prior_used_seeds:
         raise ValueError("confirmation panels overlap a prior RA-QMIX protocol")
     device = torch.device(
         "cuda"
@@ -402,7 +403,7 @@ def run(args: argparse.Namespace) -> Path:
     manifest: dict[str, Any] = {
         "status": "RUNNING",
         "experiment": "ra_qmix_curriculum_confirmation",
-        "protocol_version": PROTOCOL_VERSION,
+        "protocol_version": protocol_version,
         "source_development_protocol": SOURCE_DEVELOPMENT_PROTOCOL,
         "source_development_commit": SOURCE_DEVELOPMENT_COMMIT,
         "profile": args.profile,
@@ -423,7 +424,7 @@ def run(args: argparse.Namespace) -> Path:
             "Fixed environment-step budget; stop only for error, non-finite loss, "
             "missing checkpoint, or audit violation."
         ),
-        "algorithm": ALGORITHM,
+        "algorithm": algorithm,
         "regime_specs": REGIME_SPECS,
         "phase_boundary_steps": phase_boundary_steps,
         "adaptation_settings": asdict(adaptation),
@@ -457,7 +458,7 @@ def run(args: argparse.Namespace) -> Path:
     _write_json(
         output / "benchmark_config.json",
         {
-            "protocol_version": PROTOCOL_VERSION,
+            "protocol_version": protocol_version,
             "environment_cells": manifest["environment_cells"],
             "objective_version": OBJECTIVE_VERSION,
             "observation_version": OBSERVATION_VERSION,
@@ -467,7 +468,7 @@ def run(args: argparse.Namespace) -> Path:
         output / "resolved_config.json",
         {
             "profile": args.profile,
-            "algorithm": ALGORITHM,
+            "algorithm": algorithm,
             "regime_specs": REGIME_SPECS,
             "phase_boundary_steps": phase_boundary_steps,
             "adaptation_settings": asdict(adaptation),
@@ -493,17 +494,17 @@ def run(args: argparse.Namespace) -> Path:
         for regime in REGIMES:
             model = PassiveValueDecomposition(
                 train_config,
-                ALGORITHM,
+                algorithm,
                 settings.hidden_dim,
                 settings.mixer_hidden_dim,
             )
             parameter_rows.append(
                 {
                     "training_regime": regime,
-                    "algorithm": ALGORITHM,
-                    "edge_utilities": COMPONENT_FLAGS[ALGORITHM][0],
-                    "queue_mixer": COMPONENT_FLAGS[ALGORITHM][1],
-                    "counterfactual_loss": COMPONENT_FLAGS[ALGORITHM][2],
+                    "algorithm": algorithm,
+                    "edge_utilities": COMPONENT_FLAGS[algorithm][0],
+                    "queue_mixer": COMPONENT_FLAGS[algorithm][1],
+                    "counterfactual_loss": COMPONENT_FLAGS[algorithm][2],
                     "lambda_cf": settings.lambda_cf,
                     "anchor_lambda": 0.0,
                     **model.parameter_counts(),
@@ -563,12 +564,13 @@ def run(args: argparse.Namespace) -> Path:
             for train_seed in tqdm(
                 train_seeds, desc=f"train seeds/{regime}", unit="seed"
             ):
+                gradient_records: list[dict[str, Any]] = []
                 root = output / regime / f"train_seed_{train_seed}" / "checkpoints"
                 if regime == CANDIDATE_REGIME:
                     checkpoints, raw_progress, diagnostics = (
                         train_value_decomposition_anchor_checkpoints(
                             train_config,
-                            ALGORITHM,
+                            algorithm,
                             train_seed,
                             budgets,
                             root,
@@ -577,6 +579,8 @@ def run(args: argparse.Namespace) -> Path:
                             cells,
                             schedules[regime, train_seed],
                             adaptation,
+                            gradient_diagnostic_interval=gradient_diagnostic_interval,
+                            gradient_records=gradient_records,
                         )
                     )
                     adaptation_diagnostics[train_seed] = diagnostics
@@ -584,7 +588,7 @@ def run(args: argparse.Namespace) -> Path:
                     checkpoints, raw_progress = (
                         train_value_decomposition_step_checkpoints(
                             train_config,
-                            ALGORITHM,
+                            algorithm,
                             train_seed,
                             budgets,
                             root,
@@ -592,12 +596,24 @@ def run(args: argparse.Namespace) -> Path:
                             device,
                             cells,
                             schedules[regime, train_seed],
+                            gradient_diagnostic_interval=gradient_diagnostic_interval,
+                            gradient_records=gradient_records,
                         )
                     )
+                if gradient_records:
+                    _append_csv(output / "gradient_diagnostics.csv", [
+                        {"training_regime": regime, "algorithm": algorithm, **row}
+                        for row in gradient_records
+                    ])
                 progress = [
                     _normalized_progress_row(regime, row, phase_boundary_steps)
                     for row in raw_progress
                 ]
+                cumulative_updates = 0
+                for row in progress:
+                    cumulative_updates += int(row["update_count"])
+                    row["episode_optimizer_updates"] = int(row["update_count"])
+                    row["cumulative_optimizer_updates"] = cumulative_updates
                 _append_csv(output / "training_progress.csv", progress)
                 _append_csv(output / "training_episodes.csv", progress)
                 final_steps[regime, train_seed] = int(
@@ -822,7 +838,7 @@ def run(args: argparse.Namespace) -> Path:
                 for right in range(left + 1, len(panels))
             ),
             "prior_seed_panels_disjoint": not (
-                (set(train_seeds) | set(evaluation_seeds)) & PRIOR_USED_SEEDS
+                (set(train_seeds) | set(evaluation_seeds)) & prior_used_seeds
             ),
             "sealed_test_panel_closed": not any(
                 int(row["eval_seed"]) in SEALED_TEST_SEEDS
@@ -846,7 +862,7 @@ def run(args: argparse.Namespace) -> Path:
         ]
         _write_csv(output / "adaptation_diagnostics.csv", diagnostics_rows)
         summary = {
-            "protocol_version": PROTOCOL_VERSION,
+            "protocol_version": protocol_version,
             "primary_endpoint": manifest["primary_endpoint"],
             "confirmation_result": decision,
             "primary_results": primary,

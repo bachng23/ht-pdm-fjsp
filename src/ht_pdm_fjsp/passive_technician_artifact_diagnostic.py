@@ -101,7 +101,7 @@ def source_inputs(source):
     return manifest, configs, index, files
 
 
-def decision_trace(config, model, eval_seed, train_seed, regime, scenario, step):
+def decision_trace(config, model, eval_seed, train_seed, regime, scenario, step, *, return_metrics=False):
     env = PassiveTechnicianEnv(config, seed=eval_seed)
     observations = env.reset()
     rows = []
@@ -128,7 +128,7 @@ def decision_trace(config, model, eval_seed, train_seed, regime, scenario, step)
                 selected_queue_length=len(env.state.queues[action - 1]) if action else None,
                 selected_busy_remaining=max(0, env.state.busy_until[action - 1] - env.time) if action else None))
         observations, _, done, _ = env.step(actions)
-    return rows
+    return (rows, env.metrics) if return_metrics else rows
 
 
 def summarize(rows):
