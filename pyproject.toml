@@ -26,6 +26,7 @@ dev = [
 
 [project.scripts]
 ht-pdm-fjsp-passive-role-context = "ht_pdm_fjsp.passive_technician_role_context:main"
+ht-pdm-fjsp-passive-policy-supervision = "ht_pdm_fjsp.passive_technician_policy_supervision:main"
 ht-pdm-fjsp-passive-oracle-representation = "ht_pdm_fjsp.passive_technician_oracle_representation:main"
 ht-pdm-fjsp-passive-cf-adaptation = "ht_pdm_fjsp.passive_technician_cf_adaptation_factorial:main"
 ht-pdm-fjsp-passive-artifact-diagnostic = "ht_pdm_fjsp.passive_technician_artifact_diagnostic:main"
