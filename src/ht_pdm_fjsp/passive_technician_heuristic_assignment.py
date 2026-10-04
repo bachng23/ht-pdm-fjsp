@@ -431,16 +431,21 @@ def run(args):
     if args.device != 'cpu':
         raise ValueError('CPU-only protocol')
     torch.set_num_threads(1)
+    # Freeze provenance before spending training budget. The process keeps its
+    # imported code even if another session later changes the checkout.
+    source_bytes = Path(__file__).read_bytes()
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
     cfg = settings(args.profile)
     seed_record = seed_audit(cfg)
     output = Path(args.output_dir).resolve()
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(output)
     output.mkdir(parents=True, exist_ok=True)
+    (output/'source_snapshot.py').write_bytes(source_bytes)
     revision, dirty = base._git_state()
     expected = 9*len(cfg['train_seeds'])
     manifest = dict(protocol_version=PROTOCOL, status='RUNNING', profile=args.profile, device='cpu',
-                    git_revision=revision, git_dirty=dirty, started_at=datetime.now(UTC).isoformat(),
+                    git_revision=revision, git_dirty=dirty, source_sha256=source_sha256, source_snapshot='source_snapshot.py', started_at=datetime.now(UTC).isoformat(),
                     runtime=base._runtime_metadata(), train_seeds=cfg['train_seeds'],
                     evaluation_seeds=cfg['evaluation_seeds'], development_seeds=cfg['development_seeds'],
                     sealed_test_evaluated=False, expected_models=expected,
@@ -487,7 +492,7 @@ def run(args):
                     checkpoint = path/'model.pt'
                     torch.save(dict(protocol_version=PROTOCOL, state_dict=model.state_dict(), config=asdict(configs['train_a']),
                                     settings=cfg, algorithm=arm, train_seed=seed, feature_contract=FEATURE_CONTRACT,
-                                    teacher_definition_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()), checkpoint)
+                                    teacher_definition_sha256=source_sha256), checkpoint)
                     restored = load_checkpoint(checkpoint)
                     for cell in ('train_a', 'train_b', 'development', 'nominal', 'medium', 'high'):
                         env = PassiveTechnicianEnv(configs[cell])
@@ -538,7 +543,7 @@ def run(args):
                 heuristic_cost=statistics.fmean(r['objective'] for r in references if r['machines'] == n and r['cell'] == 'development'),
                 interpretation='teacher is achievable comparator, not certified floor; gates unchanged')
                 for n in range(2, 6) for a in arms_for(n)]
-        base._write_json(output/'teacher_audit.json', dict(oracle=teacher_audits, heuristic_definition_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        base._write_json(output/'teacher_audit.json', dict(oracle=teacher_audits, heuristic_definition_sha256=source_sha256,
                                                           oracle_access_in_heuristic=False, heuristic_future_events_access=False))
         base._write_csv(output/'paired_seed_metrics.csv', paired)
         base._write_csv(output/'episodes.csv', episodes)

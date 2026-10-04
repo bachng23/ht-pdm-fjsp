@@ -166,3 +166,39 @@ def test_scientific_gate_uses_training_seeds_not_episode_count():
         if r['algorithm'] == exp.ARMS[1]:
             r['objective'] = 96.
     assert not exp.summarize(episodes, cfg, True)[1]['primary']['passed']
+
+
+def test_source_removed_during_training_uses_frozen_provenance(tmp_path, monkeypatch):
+    import hashlib
+    from pathlib import Path
+    source = tmp_path/'transient_runner.py'
+    original = Path(exp.__file__).read_bytes()
+    source.write_bytes(original)
+    expected_hash = hashlib.sha256(original).hexdigest()
+    seed_record = exp.seed_audit(exp.settings('smoke'))
+    # Simulate a checkout change after preflight, without touching repository code.
+    monkeypatch.setattr(exp, '__file__', str(source))
+    monkeypatch.setattr(exp, 'seed_audit', lambda cfg: seed_record)
+    original_settings = exp.settings
+    def tiny_settings(profile):
+        cfg = original_settings(profile)
+        cfg.update(env_steps=16, updates=1)
+        return cfg
+    monkeypatch.setattr(exp, 'settings', tiny_settings)
+    original_fit = exp.fit
+    def delete_then_fit(*args, **kwargs):
+        source.unlink(missing_ok=True)
+        return original_fit(*args, **kwargs)
+    monkeypatch.setattr(exp, 'fit', delete_then_fit)
+    output = tmp_path/'run'
+    exp.run(SimpleNamespace(profile='smoke', device='cpu', output_dir=str(output)))
+    manifest = json.loads((output/'manifest.json').read_text())
+    assert manifest['status'] == 'COMPLETED'
+    assert manifest['source_sha256'] == expected_hash
+    assert (output/'source_snapshot.py').read_bytes() == original
+    assert not source.exists()
+    for path in output.rglob('model.pt'):
+        assert torch.load(path, weights_only=True)['teacher_definition_sha256'] == expected_hash
+    teacher = json.loads((output/'teacher_audit.json').read_text())
+    assert teacher['heuristic_definition_sha256'] == expected_hash
+    assert 'source_snapshot.py' in manifest['outputs']

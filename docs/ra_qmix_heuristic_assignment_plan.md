@@ -33,3 +33,6 @@ New UTC directory; reject nonempty paths. manifest.json (protocol, git/runtime/s
 
 ## Engineering amendment before full run
 The first smoke checked operation only. Review then replaced adjacent environment offsets with disjoint RNG stream panels (above), preventing accidental reuse between training replicates. No heuristic, scientific threshold, test matrix or budget was selected from smoke outcomes. A fresh smoke is required for the final code.
+
+## Provenance repair after interrupted lab run
+A lab run at commit 1abdf28 failed during checkpoint serialization because the source path no longer existed. The source was repeatedly reread for hashing. Freeze source bytes/SHA256 before training, persist source_snapshot.py, and reuse that hash for manifest, checkpoints and teacher audit. Failure to read source at startup fails before training. This engineering repair changes no hypothesis, seeds, features, objective, metrics, budget or threshold. Previous failed artifacts stay untouched. No resume contract is added; the next full run uses a new timestamp. A regression test must delete the source path during fitting and still complete with the original snapshot/hash.
