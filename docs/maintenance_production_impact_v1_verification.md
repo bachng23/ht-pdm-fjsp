@@ -1,0 +1,18 @@
+# Production impact v1 — local verification
+
+Material Passport: ARS experiment-agent / run; 2026-10-04; engineering verification only.
+
+- Branch: `codex/maintenance-production-impact-v1`, isolated managed worktree based on ccaff3e.
+- Added only `maintenance_production_impact.py`, its tests, plan and this verification note. Older simulator modules and raw results unchanged.
+- Full suite: **292 passed**, 29.89 s; one existing SB3 experimental-tqdm warning. Command `.venv/bin/python -m pytest -q -p no:cacheprovider`.
+- Twenty new tests cover direct productive completion clocks, pause/resume after failure and service, no final-job hazard, finished-machine masks, queued production/failure, simultaneous urgency admission, immutable occupancy, old completion-tie counterexample, reservation conflicts, finite-work guards, matched factorial controls, no production in failed/service state, recurring late contention, policy checkpoint roundtrip, inference units, complete smoke artifact contract and refused overwrite. Smoke-generation guard rejects any sealed config seed.
+- Final precommit Mac smoke: `artifacts/maintenance_production_smoke_20261004T154835Z`, COMPLETED. 128 development episodes; 48 evaluation episodes; 8 resolved configs and coordination rows; 432 job-completion rows. Per-step traces vary with observed makespan and are audited against every first-shock episode's length.
+- All 48 episodes and all recorded decision/state/work transitions and job completions replayed exactly; max numeric error 0 (timing excluded). Shared implementation consistency check, NOT independent reproduction or scientific success.
+- Hashes, partial/final byte equality, checkpoint selection/load, feasibility, conservation and artifact keys checked. Adjacent `.audit.json` stores file hashes and exact counts. Precommit smoke source is intentionally dirty because the new files were not committed yet; a clean-commit smoke will run before push.
+- Scientific smoke status `ENGINEERING_ONLY`, all scientific gates false. Full configurations/shocks unopened; smoke tuned values not carried into full (full will tune on its fresh development panel).
+- Local seed freshness: 70 prior manifest files checked against smoke/development/sealed/bootstrap seeds; no overlaps. This is local-inventory evidence, not a claim about untransferred remote experiments.
+- Full-sized engineering runtime probe used only instance870100/shock871100, 6 machines and 64 jobs/machine; twelve policy/cell episodes took 0.321 s on local Mac, max492 ticks. No tuning, gate setting or scientific inference from this probe; full lab elapsed time includes development, shared-shock panels, diagnostics and disk writes.
+- Full scope: 11,520 eval episodes, 2,304 dev episodes, 192 resolved configs/coordination rows, 138,240 first-shock job-completion rows and variable decision traces. CPU-only, no neural training. Append trace/completion checkpoints per cell; refresh partial episode table per cell.
+- Full execution requires a clean commit, empty new timestamp directory, no resume. Max-step cap raises FAILED rather than accepting censored production completion. No SSH/lab launch/transfer by assistant. Follow `docs/experiment_workflow.md`.
+
+Limits: fixed machine routes/all jobs initially released, preempt-resume/no work loss, exact health/dynamics, no real production revenue/rerouting/due dates. Gates distinguish capacity×skill burden, remedy and persistence; failure of the chosen heuristic does not refute all coordination problems. Paired CIs use independent instance means conditional on the fixed common shock panel; secondary comparisons descriptive.
