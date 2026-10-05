@@ -25,6 +25,7 @@ dev = [
 ]
 
 [project.scripts]
+ht-pdm-fjsp-maintenance-priority-allocation = "ht_pdm_fjsp.maintenance_priority_allocation:main"
 ht-pdm-fjsp-passive-heuristic-assignment = "ht_pdm_fjsp.passive_technician_heuristic_assignment:main"
 ht-pdm-fjsp-passive-td-assignment = "ht_pdm_fjsp.passive_technician_td_assignment:main"
 ht-pdm-fjsp-passive-role-context = "ht_pdm_fjsp.passive_technician_role_context:main"
