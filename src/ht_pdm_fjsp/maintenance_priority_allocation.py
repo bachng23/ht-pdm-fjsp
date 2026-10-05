@@ -20,15 +20,18 @@ from ht_pdm_fjsp.maintenance_dispatch import DispatchEnv, DispatchState
 from ht_pdm_fjsp.maintenance_dispatch_policy import (
     DispatchActorCritic,
     MODES,
+    RULE_MODE,
+    DEPLOYMENT_MODES,
     batch_observations,
     batch_sequences,
     rule_action,
 )
 
-PROTOCOL = "maintenance_priority_allocation_v1"
+PROTOCOL = "maintenance_priority_allocation_v2"
 PRIMARY = ("n3_nominal", "n3_pressure", "n4_nominal", "n4_pressure")
 NOMINAL = ("n3_nominal", "n4_nominal")
 REWARD_SCALE = 20.0
+REPOSITORY = Path(__file__).resolve().parents[2]
 
 
 def settings(profile):
@@ -36,11 +39,11 @@ def settings(profile):
         raise ValueError(profile)
     full = profile == "full"
     return dict(
-        train_seeds=list(range(110000, 110010)) if full else [114000],
-        development_seeds=list(range(111000, 111020)) if full else [114020],
-        evaluation_seeds=list(range(112000, 112050))
+        train_seeds=list(range(116000, 116010)) if full else [119000],
+        development_seeds=list(range(117000, 117020)) if full else [119020],
+        evaluation_seeds=list(range(118000, 118050))
         if full
-        else [114010, 114011, 114012],
+        else [119010, 119011, 119012],
         env_steps=120000 if full else 48,
         rollout=480 if full else 24,
         epochs=4 if full else 2,
@@ -57,10 +60,7 @@ def settings(profile):
 
 
 def seed_audit(cfg):
-    path = (
-        Path(__file__).resolve().parents[2]
-        / "configs/maintenance_priority_allocation_seed_registry.json"
-    )
+    path = REPOSITORY / "configs/maintenance_priority_allocation_v2_seed_registry.json"
     registry = json.loads(path.read_text())
     panels = [
         set(cfg[k]) for k in ("train_seeds", "development_seeds", "evaluation_seeds")
@@ -558,7 +558,41 @@ class SmallOracle:
         )
 
 
-def summarize(episodes, cfg, full):
+def summarize(episodes, cfg, full, references):
+    if full and len(cfg["train_seeds"]) != 10:
+        raise RuntimeError("confirmatory protocol requires ten training seeds")
+    expected_episode_keys = {
+        (arm, seed, family, ev)
+        for arm in MODES
+        for seed in cfg["train_seeds"]
+        for family in envmod.FAMILIES
+        for ev in cfg["evaluation_seeds"]
+    }
+    episode_keys = {
+        (r["algorithm"], r["train_seed"], r["family"], r["eval_seed"]) for r in episodes
+    }
+    if episode_keys != expected_episode_keys or len(episodes) != len(
+        expected_episode_keys
+    ):
+        raise RuntimeError("incomplete or duplicate evaluation panel")
+    # The rule is evaluated once on the SAME held-out episode panel. Reuse its
+    # panel mean against each training seed without fabricating rule replicates.
+    reference_keys = {(r["family"], r["eval_seed"]) for r in references}
+    expected_keys = {
+        (family, seed)
+        for family in (*envmod.FAMILIES, "development")
+        for seed in (
+            cfg["development_seeds"]
+            if family == "development"
+            else cfg["evaluation_seeds"]
+        )
+    }
+    if (
+        reference_keys != expected_keys
+        or len(references) != len(expected_keys)
+        or any(r["algorithm"] != RULE_MODE for r in references)
+    ):
+        raise RuntimeError("incomplete or duplicate reference evaluation panel")
     idx = {}
     for arm in MODES:
         for seed in cfg["train_seeds"]:
@@ -572,6 +606,10 @@ def summarize(episodes, cfg, full):
                 if len(rr) != len(cfg["evaluation_seeds"]):
                     raise RuntimeError("incomplete evaluation panel")
                 idx[arm, seed, family] = statistics.fmean(rr)
+    for family in envmod.FAMILIES:
+        costs = [r["objective"] for r in references if r["family"] == family]
+        for seed in cfg["train_seeds"]:
+            idx[RULE_MODE, seed, family] = statistics.fmean(costs)
     pairs = []
     contrasts = {}
 
@@ -627,9 +665,44 @@ def summarize(episodes, cfg, full):
             if full
             else None,
         )
+    reference_contrasts = {}
+    for arm in MODES:
+        deltas = [
+            mean(arm, seed) - mean(RULE_MODE, seed) for seed in cfg["train_seeds"]
+        ]
+        rule_cost = mean(RULE_MODE, cfg["train_seeds"][0])
+        delta = statistics.fmean(deltas)
+        radius = (
+            2.262157163 * statistics.stdev(deltas) / math.sqrt(10) if full else None
+        )
+        reference_contrasts[arm] = dict(
+            rule_cost=rule_cost,
+            learned_cost=rule_cost + delta,
+            mean_delta=delta,
+            relative_reduction=-delta / rule_cost if rule_cost else None,
+            improving_training_seeds=sum(d < -1e-8 for d in deltas),
+            ci95_descriptive=[delta - radius, delta + radius] if full else None,
+            nominal_rule=nominal(RULE_MODE),
+            nominal_learned=nominal(arm),
+            nominal_relative_increase=nominal(arm) / nominal(RULE_MODE) - 1
+            if nominal(RULE_MODE)
+            else None,
+            confirmatory=False,
+            inference_unit="training seed conditional on fixed evaluation panel; rule evaluated once",
+        )
+    primary_passed = all(r["passed"] for r in contrasts.values()) if full else None
+    rule_comparison = reference_contrasts[MODES[0]]
     return pairs, dict(
         contrasts=contrasts,
-        primary_passed=all(r["passed"] for r in contrasts.values()) if full else None,
+        reference_contrasts=reference_contrasts,
+        primary_passed=primary_passed,
+        learning_benefit_with_rule_descriptive=(
+            primary_passed
+            and rule_comparison["mean_delta"] < 0
+            and rule_comparison["nominal_learned"] <= rule_comparison["nominal_rule"]
+        )
+        if full
+        else None,
         scientific_gate_applicable=full,
         inference_unit="paired training seed; mean N3/4 nominal/pressure",
         secondary_families=["n5_pressure", "n5_k3_sparse", "small"],
@@ -638,9 +711,98 @@ def summarize(episodes, cfg, full):
                 f: statistics.fmean(idx[arm, s, f] for s in cfg["train_seeds"])
                 for f in envmod.FAMILIES
             }
-            for arm in MODES
+            for arm in DEPLOYMENT_MODES
         },
     )
+
+
+def exact_headroom(exact, *, require_complete=True):
+    """Exact-cell ceiling only; never adjust the confirmatory practical gate."""
+    rows = []
+    if (
+        not exact
+        or max(r["exact_optimum"] for r in exact)
+        - min(r["exact_optimum"] for r in exact)
+        > 1e-8
+    ):
+        raise RuntimeError("inconsistent exact optimum")
+    for record in exact:
+        cost = record["exact_policy_cost"]
+        optimum = record["exact_optimum"]
+        gap = record["optimality_gap"]
+        if abs(cost - optimum - gap) > 1e-8 or gap < -1e-8:
+            raise RuntimeError("exact headroom cost reconciliation")
+        if (
+            abs(
+                record["exact_selection_regret"]
+                + record["exact_allocation_regret"]
+                - gap
+            )
+            > 1e-8
+        ):
+            raise RuntimeError("exact headroom regret reconciliation")
+        rows.append(
+            dict(
+                **record,
+                maximum_relative_reduction=max(0.0, gap) / cost if cost > 0 else None,
+                five_percent_possible_unrestricted=gap + 1e-8 >= 0.05 * cost
+                if cost > 0
+                else False,
+            )
+        )
+    rule = [r for r in rows if r["algorithm"] == RULE_MODE]
+    if len(rule) != 1:
+        raise RuntimeError("exact rule headroom missing or duplicate")
+    indices = {(r["algorithm"], r["train_seed"]): r for r in rows}
+    if len(indices) != len(rows):
+        raise RuntimeError("duplicate exact policy")
+    contrasts = []
+    for record in rows:
+        if record["algorithm"] != MODES[0]:
+            continue
+        seed = record["train_seed"]
+        for control in (*MODES[1:], RULE_MODE):
+            baseline = rule[0] if control == RULE_MODE else indices.get((control, seed))
+            if baseline is None:
+                if require_complete:
+                    raise RuntimeError("incomplete exact controls")
+                continue
+            cost = baseline["exact_policy_cost"]
+            delta = record["exact_policy_cost"] - cost
+            contrasts.append(
+                dict(
+                    control=control,
+                    train_seed=seed,
+                    learned_cost=record["exact_policy_cost"],
+                    control_cost=cost,
+                    exact_optimum=baseline["exact_optimum"],
+                    cost_delta=delta,
+                    relative_reduction=-delta / cost if cost > 0 else None,
+                    control_maximum_relative_reduction=baseline[
+                        "maximum_relative_reduction"
+                    ],
+                    five_percent_possible_unrestricted=baseline[
+                        "five_percent_possible_unrestricted"
+                    ],
+                )
+            )
+    summary = dict(
+        scope="N2/K2 exact cell only, unrestricted optimal continuation; not N3/N4 headroom or restricted architecture feasibility",
+        rule_cost=rule[0]["exact_policy_cost"],
+        exact_optimum=rule[0]["exact_optimum"],
+        rule_maximum_relative_reduction=rule[0]["maximum_relative_reduction"],
+        rule_five_percent_possible_unrestricted=rule[0][
+            "five_percent_possible_unrestricted"
+        ],
+        policies_with_less_than_five_percent_headroom=[
+            dict(algorithm=r["algorithm"], train_seed=r["train_seed"])
+            for r in rows
+            if not r["five_percent_possible_unrestricted"]
+        ],
+        confirmatory_threshold_unchanged=True,
+        used_for_training_or_selection=False,
+    )
+    return rows, contrasts, summary
 
 
 def run(args):
@@ -651,6 +813,9 @@ def run(args):
         raise FileExistsError(output)
     torch.set_num_threads(1)
     cfg = settings(args.profile)
+    revision, dirty = helpers._git_state()
+    if args.profile == "full" and (revision is None or dirty is not False):
+        raise RuntimeError("full experiment requires a clean Git checkout")
     audit = seed_audit(cfg)
     # Freeze all new source modules before training; never reread source during checkpoints.
     sources = {
@@ -658,6 +823,11 @@ def run(args):
         for module in (envmod, policymod)
     }
     sources[Path(__file__).name] = Path(__file__).read_bytes()
+    for path in (
+        REPOSITORY / "docs/maintenance_priority_allocation_v2_plan.md",
+        REPOSITORY / "configs/maintenance_priority_allocation_v2_seed_registry.json",
+    ):
+        sources[path.name] = path.read_bytes()
     source_hashes = {
         name: hashlib.sha256(data).hexdigest() for name, data in sources.items()
     }
@@ -668,8 +838,7 @@ def run(args):
     (output / "source_snapshot").mkdir()
     for name, data in sources.items():
         (output / "source_snapshot" / name).write_bytes(data)
-    revision, dirty = helpers._git_state()
-    models = 3 * len(cfg["train_seeds"])
+    models = len(MODES) * len(cfg["train_seeds"])
     per_updates = cfg["env_steps"] // cfg["rollout"]
     per_optimizer = per_updates * cfg["epochs"] * cfg["rollout"] // cfg["minibatch"]
     manifest = dict(
@@ -682,6 +851,9 @@ def run(args):
         started_at=datetime.now(UTC).isoformat(),
         runtime=helpers._runtime_metadata(),
         settings=cfg,
+        deployment_modes=DEPLOYMENT_MODES,
+        rule_trained=False,
+        fixed_priority_contract="rule order of all feasible candidates; learned serve/STOP and allocation",
         source_hashes=source_hashes,
         source_bundle_sha256=bundle_hash,
         sealed_test_evaluated=False,
@@ -715,6 +887,7 @@ def run(args):
         dict(
             settings=cfg,
             modes=MODES,
+            deployment_modes=DEPLOYMENT_MODES,
             training_population=dict(
                 machines=[2, 3, 4],
                 technicians=[1, 2],
@@ -761,6 +934,11 @@ def run(args):
                 **small.evaluate("risk_skill_rule"),
             )
         )
+        # Persist the rule's exact ceiling before any model is trained. This
+        # is a diagnostic report, never a budget or threshold adaptation.
+        headroom, exact_contrasts, headroom_summary = exact_headroom(exact)
+        write_csv(output / "exact_headroom.csv", headroom)
+        write_json(output / "exact_headroom_summary.json", headroom_summary)
         for family in (*envmod.FAMILIES, "development"):
             seeds = (
                 cfg["development_seeds"]
@@ -769,7 +947,19 @@ def run(args):
             )
             for seed in tqdm(seeds, desc=f"rule {family}", unit="episode", leave=False):
                 config = envmod.family_config(family, seed, args.profile)
-                row, _, _ = rollout(config, seed, "risk_skill_rule")
+                row, traces, machines = rollout(
+                    config, seed, RULE_MODE, trace=family != "development"
+                )
+                key = dict(family=family, algorithm=RULE_MODE, train_seed=-1)
+                if family != "development":
+                    append_csv(
+                        output / "reference_decisions.csv",
+                        [dict(**key, eval_seed=seed, **r) for r in traces],
+                    )
+                    append_csv(
+                        output / "reference_machine_metrics.csv",
+                        [dict(**key, eval_seed=seed, **r) for r in machines],
+                    )
                 references.append(
                     dict(
                         family=family, algorithm="risk_skill_rule", train_seed=-1, **row
@@ -871,8 +1061,16 @@ def run(args):
                 write_csv(output / "episodes.partial.csv", episodes)
                 write_csv(output / "development_episodes.csv", development)
                 write_csv(output / "exact_small_metrics.csv", exact)
+                headroom, exact_contrasts, headroom_summary = exact_headroom(
+                    exact, require_complete=False
+                )
+                write_csv(output / "exact_headroom.csv", headroom)
+                write_csv(output / "exact_headroom_contrasts.csv", exact_contrasts)
+                write_json(output / "exact_headroom_summary.json", headroom_summary)
                 actual += 1
-        pairs, summary = summarize(episodes, cfg, args.profile == "full")
+        headroom, exact_contrasts, headroom_summary = exact_headroom(exact)
+        pairs, summary = summarize(episodes, cfg, args.profile == "full", references)
+        summary["exact_headroom"] = headroom_summary
         audits = dict(
             complete_models=actual == models,
             complete_test_episodes=len(episodes) == manifest["expected_test_episodes"],
@@ -882,6 +1080,14 @@ def run(args):
             == len(envmod.FAMILIES) * len(cfg["evaluation_seeds"])
             + len(cfg["development_seeds"]),
             complete_exact_rows=len(exact) == models + 1,
+            complete_exact_headroom_rows=len(headroom) == models + 1,
+            complete_exact_headroom_contrasts=len(exact_contrasts)
+            == 3 * len(cfg["train_seeds"]),
+            four_deployment_baselines=len(summary["family_mean_costs"]) == 4,
+            unique_reference_keys=len(
+                {(r["family"], r["eval_seed"]) for r in references}
+            )
+            == len(references),
             matched_capacity=len({r["parameters"] for r in counts}) == 1,
             complete_training_budget=sum(r["env_steps"] for r in coverage)
             == manifest["expected_training_steps"],
@@ -935,6 +1141,13 @@ def run(args):
             raise RuntimeError(f"engineering audit failure {audits}")
         summary["audits"] = audits
         write_csv(output / "paired_seed_metrics.csv", pairs)
+        write_csv(
+            output / "reference_contrasts.csv",
+            [
+                dict(algorithm=arm, **record)
+                for arm, record in summary["reference_contrasts"].items()
+            ],
+        )
         write_csv(output / "episodes.csv", episodes)
         write_csv(output / "coordination.csv", episodes + development)
         write_json(output / "summary.json", summary)

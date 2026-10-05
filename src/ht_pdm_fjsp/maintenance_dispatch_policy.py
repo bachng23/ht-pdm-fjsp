@@ -6,6 +6,8 @@ from torch import nn
 from torch.distributions import Categorical
 
 MODES = ("learned_both", "fixed_priority", "fixed_allocation")
+RULE_MODE = "risk_skill_rule"
+DEPLOYMENT_MODES = (*MODES, RULE_MODE)
 
 
 def batch_observations(rows):
@@ -50,7 +52,7 @@ def feasible(batch, used_m, used_t):
     )
 
 
-def fixed_machine(batch, mask):
+def fixed_machine(batch, mask, *, urgent_only=True):
     machines = batch["machines"]
     threshold = batch["global_features"][:, 1] * 8.0
     urgent = (machines[..., 1] > 0.5) | (
@@ -62,7 +64,10 @@ def fixed_machine(batch, mask):
         + machines[..., 0]
         + machines[..., 5]
     )
-    scores = scores.masked_fill(~(urgent & mask.any(-1)), -torch.inf)
+    candidates = mask.any(-1)
+    if urgent_only:
+        candidates = candidates & urgent
+    scores = scores.masked_fill(~candidates, -torch.inf)
     chosen = scores.argmax(-1)
     return torch.where(
         torch.isfinite(scores.max(-1).values),
@@ -169,7 +174,7 @@ class DispatchActorCritic(nn.Module):
         )
         return m, t, e, g, self.value_head(g).squeeze(-1)
 
-    def distributions(self, encoded, batch, used_m, used_t, prefix, count):
+    def distributions(self, encoded, batch, used_m, used_t, prefix, count, mode):
         m, t, e, g, value = encoded
         b, n, h = m.shape
         mask = feasible(batch, used_m, used_t)
@@ -178,6 +183,12 @@ class DispatchActorCritic(nn.Module):
             torch.cat((m, context[:, None].expand(-1, n, -1)), -1)
         ).squeeze(-1)
         logits = logits.masked_fill(~mask.any(-1), -torch.inf)
+        if mode == "fixed_priority":
+            # Fix identity/order only. The selected machine's score versus
+            # STOP remains a learned timing decision, including nonurgent PM.
+            ranked = fixed_machine(batch, mask, urgent_only=False)
+            allowed = torch.arange(n)[None, :] == ranked[:, None]
+            logits = logits.masked_fill(~allowed, -torch.inf)
         stop = self.stop_head(torch.cat((context, count[:, None]), -1))
         return Categorical(logits=torch.cat((logits, stop), -1)), mask
 
@@ -233,12 +244,10 @@ class DispatchActorCritic(nn.Module):
         stages = sequences.shape[1] if sequences is not None else k + 1
         for stage in range(stages):
             machine_dist, mask = self.distributions(
-                encoded, batch, used_m, used_t, prefix, count
+                encoded, batch, used_m, used_t, prefix, count, mode
             )
             if sequences is None:
-                if mode == "fixed_priority":
-                    machine = fixed_machine(batch, mask)
-                elif deterministic:
+                if deterministic:
                     machine = machine_dist.logits.argmax(-1)
                 else:
                     machine = torch.multinomial(
@@ -254,8 +263,10 @@ class DispatchActorCritic(nn.Module):
                 )
                 if ((machine < 0) | (machine > n)).any():
                     raise RuntimeError("invalid sequence machine")
+                selected_rows = active & (machine != n)
                 if mode == "fixed_priority" and not torch.equal(
-                    machine[active], fixed_machine(batch, mask)[active]
+                    machine[selected_rows],
+                    fixed_machine(batch, mask, urgent_only=False)[selected_rows],
                 ):
                     raise RuntimeError("fixed priority sequence mismatch")
             pair_active = active & (machine != n)
@@ -266,9 +277,8 @@ class DispatchActorCritic(nn.Module):
             )
             if not chosen_allowed[active].all():
                 raise RuntimeError("infeasible machine sequence")
-            if mode != "fixed_priority":
-                logprob = logprob + machine_dist.log_prob(machine) * active
-                entropy = entropy + machine_dist.entropy() * active
+            logprob = logprob + machine_dist.log_prob(machine) * active
+            entropy = entropy + machine_dist.entropy() * active
             technician_dist = self.technician_distribution(
                 encoded, batch, mask, machine, pair_active, prefix
             )

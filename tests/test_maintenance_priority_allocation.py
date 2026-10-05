@@ -127,28 +127,56 @@ def synthetic_episodes(
     return result
 
 
+def synthetic_references(cfg, cost=100.0):
+    return [
+        dict(
+            algorithm="risk_skill_rule",
+            train_seed=-1,
+            family=family,
+            eval_seed=seed,
+            objective=cost,
+        )
+        for family in (*experiment.envmod.FAMILIES, "development")
+        for seed in (
+            cfg["development_seeds"]
+            if family == "development"
+            else cfg["evaluation_seeds"]
+        )
+    ]
+
+
 def test_confirmatory_contrasts_require_both_controls_and_nominal_guard():
     cfg = experiment.settings("full")
-    _, summary = experiment.summarize(synthetic_episodes(cfg), cfg, True)
+    _, summary = experiment.summarize(
+        synthetic_episodes(cfg), cfg, True, synthetic_references(cfg)
+    )
     assert summary["primary_passed"]
+    assert len(summary["family_mean_costs"]) == 4
+    assert summary["reference_contrasts"]["learned_both"]["mean_delta"] == -10.0
     assert summary["contrasts"]["fixed_priority"]["ci97_5_bonferroni"] == [-10.0, -10.0]
     _, summary = experiment.summarize(
-        synthetic_episodes(cfg, allocation=85.0), cfg, True
+        synthetic_episodes(cfg, allocation=85.0), cfg, True, synthetic_references(cfg)
     )
     assert not summary["primary_passed"]
     # Strong pressure gains cannot excuse nominal regression.
     _, summary = experiment.summarize(
-        synthetic_episodes(cfg, learned=40.0, nominal=120.0), cfg, True
+        synthetic_episodes(cfg, learned=40.0, nominal=120.0),
+        cfg,
+        True,
+        synthetic_references(cfg),
     )
     assert not summary["primary_passed"]
     _, summary = experiment.summarize(
         synthetic_episodes(experiment.settings("smoke")),
         experiment.settings("smoke"),
         False,
+        synthetic_references(experiment.settings("smoke")),
     )
     assert summary["primary_passed"] is None
     with pytest.raises(RuntimeError, match="incomplete"):
-        experiment.summarize(synthetic_episodes(cfg)[:-1], cfg, True)
+        experiment.summarize(
+            synthetic_episodes(cfg)[:-1], cfg, True, synthetic_references(cfg)
+        )
 
 
 def test_complete_smoke_freezes_source_once_and_preserves_artifacts(
@@ -204,6 +232,15 @@ def test_complete_smoke_freezes_source_once_and_preserves_artifacts(
         model, payload = experiment.load_checkpoint(checkpoint)
         assert payload["source_bundle_sha256"] == manifest["source_bundle_sha256"]
         assert all(torch.isfinite(p).all() for p in model.parameters())
+        assert payload["protocol"] == "maintenance_priority_allocation_v2"
+    with (output / "exact_headroom.csv").open() as f:
+        assert len(list(csv.DictReader(f))) == 4
+    with (output / "exact_headroom_contrasts.csv").open() as f:
+        assert len(list(csv.DictReader(f))) == 3
+    with (output / "reference_decisions.csv").open() as f:
+        assert len(list(csv.DictReader(f))) == 81
+    with (output / "reference_machine_metrics.csv").open() as f:
+        assert len(list(csv.DictReader(f))) == 78
     with pytest.raises(FileExistsError):
         experiment.run(args)
 
@@ -223,3 +260,101 @@ def test_failure_status_and_partial_outputs_are_preserved(tmp_path, monkeypatch)
     assert (tmp_path / "failed/reference_episodes.csv").is_file()
     with pytest.raises(FileExistsError):
         experiment.run(args)
+
+
+def test_reference_is_not_third_confirmatory_contrast_and_can_beat_all_learners():
+    cfg = experiment.settings("full")
+    _, summary = experiment.summarize(
+        synthetic_episodes(cfg), cfg, True, synthetic_references(cfg, cost=80.0)
+    )
+    assert summary["primary_passed"]  # Original two-comparison gate unchanged.
+    assert not summary["learning_benefit_with_rule_descriptive"]
+    assert len(summary["contrasts"]) == 2
+    reference = summary["reference_contrasts"]["learned_both"]
+    assert reference["ci95_descriptive"] == [10.0, 10.0]
+    assert not reference["confirmatory"]
+    assert "rule evaluated once" in reference["inference_unit"]
+
+
+def test_paired_ci_uses_training_seeds_after_episode_averaging():
+    cfg = experiment.settings("full")
+    rows = synthetic_episodes(cfg)
+    for row in rows:
+        if row["algorithm"] == "learned_both":
+            row["objective"] += row["train_seed"] - cfg["train_seeds"][0]
+    _, summary = experiment.summarize(rows, cfg, True, synthetic_references(cfg))
+    # Deltas -10..-1, mean -5.5, sample variance 55/6, standard error sqrt(11/12).
+    radius = 2.685010847 * (11 / 12) ** 0.5
+    assert summary["contrasts"]["fixed_priority"]["ci97_5_bonferroni"] == pytest.approx(
+        [-5.5 - radius, -5.5 + radius]
+    )
+
+
+def test_reference_and_episode_key_duplicates_are_rejected():
+    cfg = experiment.settings("smoke")
+    references = synthetic_references(cfg)
+    with pytest.raises(RuntimeError, match="reference"):
+        experiment.summarize(synthetic_episodes(cfg), cfg, False, references[:-1])
+    with pytest.raises(RuntimeError, match="duplicate"):
+        experiment.summarize(
+            synthetic_episodes(cfg),
+            cfg,
+            False,
+            [references[0], *references[1:-1], references[0]],
+        )
+    rows = synthetic_episodes(cfg)
+    with pytest.raises(RuntimeError, match="duplicate"):
+        experiment.summarize([rows[0], *rows[1:-1], rows[0]], cfg, False, references)
+
+
+def test_exact_headroom_distinguishes_no_margin_from_failed_practical_gate():
+    cfg = DispatchConfig(2, 2, 1, 1, 1.0, ((1, 1), (1, 1)), ((1.0, 1.0), (1.0, 1.0)))
+    result = experiment.SmallOracle(cfg).evaluate("risk_skill_rule")
+    rows, contrasts, summary = experiment.exact_headroom(
+        [
+            dict(
+                algorithm=arm,
+                train_seed=-1 if arm == "risk_skill_rule" else 1,
+                **result,
+            )
+            for arm in (*MODES, "risk_skill_rule")
+        ]
+    )
+    assert len(rows) == 4 and len(contrasts) == 3
+    assert all(r["maximum_relative_reduction"] == 0 for r in rows)
+    assert not summary["rule_five_percent_possible_unrestricted"]
+    assert summary["confirmatory_threshold_unchanged"]
+    assert "not N3/N4" in summary["scope"]
+    altered = dict(rows[0], optimality_gap=1.0)
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        experiment.exact_headroom([altered, rows[-1]])
+
+
+def test_full_dirty_checkout_rejected_before_artifacts_or_test_config(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(experiment.helpers, "_git_state", lambda: ("revision", True))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("test configuration generated before Git guard")
+
+    monkeypatch.setattr(experiment.envmod, "family_config", forbidden)
+    output = tmp_path / "full"
+    args = argparse.Namespace(profile="full", device="cpu", output_dir=str(output))
+    with pytest.raises(RuntimeError, match="clean Git"):
+        experiment.run(args)
+    assert not output.exists()
+
+
+def test_v1_checkpoint_rejected(tmp_path):
+    checkpoint = tmp_path / "old.pt"
+    torch.save(
+        dict(
+            protocol="maintenance_priority_allocation_v1",
+            environment_version=experiment.envmod.ENV_VERSION,
+            observation_contract=experiment.envmod.OBSERVATION_CONTRACT,
+        ),
+        checkpoint,
+    )
+    with pytest.raises(ValueError, match="contract"):
+        experiment.load_checkpoint(checkpoint)

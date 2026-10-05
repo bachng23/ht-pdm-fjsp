@@ -15,6 +15,8 @@ from ht_pdm_fjsp.maintenance_dispatch_policy import (
     batch_observations,
     batch_sequences,
     rule_action,
+    fixed_machine,
+    feasible,
 )
 
 
@@ -51,15 +53,18 @@ def test_sample_replay_batched_padding_gradient_and_capacity(mode):
     assert all(
         torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None
     )
-    unused = (
-        model.machine_head
-        if mode == "fixed_priority"
-        else model.technician_head
-        if mode == "fixed_allocation"
-        else None
-    )
+    unused = model.technician_head if mode == "fixed_allocation" else None
     if unused is not None:
         assert all(p.grad is None for p in unused.parameters())
+    if mode == "fixed_priority":
+        assert any(
+            p.grad is not None and p.grad.abs().sum() > 0
+            for p in model.machine_head.parameters()
+        )
+        assert any(
+            p.grad is not None and p.grad.abs().sum() > 0
+            for p in model.stop_head.parameters()
+        )
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -174,3 +179,56 @@ def test_rule_uses_risk_wait_and_compatible_free_skill_only():
     )
     obs = env.reset(0, DispatchState((3, 3), (True, True), (4, 1), (0, 0), (-1, -1)))
     assert rule_action(obs) == ((0, 0), (1, 1))
+
+
+def test_fixed_priority_learns_stop_even_with_failed_demand():
+    cfg = family_config("small", 0, "smoke")
+    obs = DispatchEnv(cfg).reset(
+        0, DispatchState((3, 3), (True, True), (4, 1), (0, 0), (-1, -1))
+    )
+    batch = batch_observations([obs])
+    model = DispatchActorCritic(16)
+    # Neutral scores give probability 1/2 each to highest-priority machine
+    # and STOP; no mass may go to another machine.
+    for head in (model.machine_head, model.stop_head):
+        for p in head.parameters():
+            torch.nn.init.zeros_(p)
+    stop = batch_sequences([[(-1, -1)]])
+    _, logprob, entropy, _ = model.decode(batch, "fixed_priority", stop)
+    assert logprob.item() == pytest.approx(-np.log(2))
+    assert entropy.item() == pytest.approx(np.log(2))
+    (-logprob.sum()).backward()
+    assert model.stop_head[-1].bias.grad.abs().sum() > 0
+    assert model.machine_head[-1].bias.grad.abs().sum() > 0
+    with torch.no_grad():
+        model.stop_head[-1].bias.fill_(10)
+    assert model.act(obs, "fixed_priority", deterministic=True)[0] == ()
+
+
+def test_fixed_priority_can_serve_nonurgent_machine_and_rejects_wrong_rank():
+    cfg = family_config("small", 0, "smoke")
+    obs = DispatchEnv(cfg).reset(
+        0, DispatchState((0, 1), (False, False), (0, 0), (0, 0), (-1, -1))
+    )
+    assert rule_action(obs) == ()  # Rule keeps its urgency trigger.
+    batch = batch_observations([obs])
+    mask = feasible(
+        batch, torch.zeros(1, 2, dtype=torch.bool), torch.zeros(1, 2, dtype=torch.bool)
+    )
+    ranked = int(fixed_machine(batch, mask, urgent_only=False)[0])
+    assert ranked == 1
+    model = DispatchActorCritic(16)
+    for head in (model.machine_head, model.stop_head):
+        for p in head.parameters():
+            torch.nn.init.zeros_(p)
+    with torch.no_grad():
+        model.machine_head[-1].bias.fill_(10)
+    pairs, tokens, prob, _ = model.act(obs, "fixed_priority", deterministic=True)
+    assert pairs[0][0] == ranked
+    validate_matching(
+        cfg, DispatchState((0, 1), (False, False), (0, 0), (0, 0), (-1, -1)), pairs
+    )
+    checked = model.decode(batch, "fixed_priority", batch_sequences([tokens]))
+    assert checked[1].item() == pytest.approx(prob, abs=1e-5)
+    with pytest.raises(RuntimeError, match="fixed priority"):
+        model.decode(batch, "fixed_priority", batch_sequences([[(0, 0), (-1, -1)]]))
