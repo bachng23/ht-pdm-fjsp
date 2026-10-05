@@ -104,6 +104,9 @@ def rule_action(observation):
 
 
 class DispatchActorCritic(nn.Module):
+    def deterministic_choice(self, logits):
+        return logits.argmax(-1)
+
     def __init__(self, hidden=64):
         super().__init__()
         self.hidden = hidden
@@ -248,7 +251,7 @@ class DispatchActorCritic(nn.Module):
             )
             if sequences is None:
                 if deterministic:
-                    machine = machine_dist.logits.argmax(-1)
+                    machine = self.deterministic_choice(machine_dist.logits)
                 else:
                     machine = torch.multinomial(
                         machine_dist.probs, 1, generator=generator
@@ -286,7 +289,7 @@ class DispatchActorCritic(nn.Module):
                 if mode == "fixed_allocation":
                     technician = fixed_technician(batch, mask, machine)
                 elif deterministic:
-                    technician = technician_dist.logits.argmax(-1)
+                    technician = self.deterministic_choice(technician_dist.logits)
                 else:
                     technician = torch.multinomial(
                         technician_dist.probs, 1, generator=generator

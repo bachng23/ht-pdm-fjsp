@@ -108,7 +108,20 @@ def model_for(cfg, seed):
     return DispatchActorCritic(cfg["hidden"])
 
 
-def fit(model, mode, cfg, seed, profile, output, logs):
+def fit(
+    model,
+    mode,
+    cfg,
+    seed,
+    profile,
+    output,
+    logs,
+    *,
+    environment_factory=DispatchEnv,
+    training_configuration=envmod.training_config,
+    algorithm=None,
+):
+    algorithm = algorithm or mode
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg["learning_rate"])
     actions = torch.Generator().manual_seed(envmod.role_seed(seed, "actions"))
     minibatches = torch.Generator().manual_seed(envmod.role_seed(seed, "minibatches"))
@@ -117,7 +130,10 @@ def fit(model, mode, cfg, seed, profile, output, logs):
     if cfg["env_steps"] % cfg["rollout"] or cfg["rollout"] % cfg["minibatch"]:
         raise ValueError("exact rollout/minibatch budget")
     for update in tqdm(
-        range(1, updates + 1), desc=f"train {mode}/{seed}", unit="rollout", leave=False
+        range(1, updates + 1),
+        desc=f"train {algorithm}/{seed}",
+        unit="rollout",
+        leave=False,
     ):
         observations, sequences, old_probs, old_values, rewards, dones = (
             [],
@@ -132,8 +148,8 @@ def fit(model, mode, cfg, seed, profile, output, logs):
         while len(rewards) < cfg["rollout"]:
             config_seed = envmod.role_seed(seed, f"config:{episodes}")
             environment_seed = envmod.role_seed(seed, f"environment:{episodes}")
-            config = envmod.training_config(config_seed, profile)
-            env = DispatchEnv(config)
+            config = training_configuration(config_seed, profile)
+            env = environment_factory(config)
             obs = env.reset(environment_seed)
             if (cfg["rollout"] - len(rewards)) < config.horizon:
                 raise RuntimeError("incomplete episode rollout")
@@ -157,7 +173,7 @@ def fit(model, mode, cfg, seed, profile, output, logs):
                 raise RuntimeError("episode return reconciliation")
             records.append(
                 dict(
-                    algorithm=mode,
+                    algorithm=algorithm,
                     train_seed=seed,
                     episode=episodes,
                     physical_steps=steps,
@@ -167,6 +183,16 @@ def fit(model, mode, cfg, seed, profile, output, logs):
                     technicians=config.technicians,
                     config_sha256=hashlib.sha256(
                         json.dumps(asdict(config), sort_keys=True).encode()
+                    ).hexdigest(),
+                    physical_config_sha256=hashlib.sha256(
+                        json.dumps(
+                            {
+                                k: v
+                                for k, v in asdict(config).items()
+                                if k not in ("waiting_price", "waiting_limit")
+                            },
+                            sort_keys=True,
+                        ).encode()
                     ).hexdigest(),
                     **env.metrics,
                 )
@@ -242,7 +268,7 @@ def fit(model, mode, cfg, seed, profile, output, logs):
         model.eval()
         logs.append(
             dict(
-                algorithm=mode,
+                algorithm=algorithm,
                 train_seed=seed,
                 rollout_update=update,
                 physical_steps=steps,
@@ -288,8 +314,10 @@ def load_checkpoint(path):
     return model.eval(), payload
 
 
-def rollout(config, seed, mode, model=None, trace=False):
-    env = DispatchEnv(config)
+def rollout(
+    config, seed, mode, model=None, trace=False, *, environment_factory=DispatchEnv
+):
+    env = environment_factory(config)
     obs = env.reset(seed)
     decisions = []
     n = config.machines
@@ -358,6 +386,7 @@ def rollout(config, seed, mode, model=None, trace=False):
         early_failed_deferred_decisions=sum(early_defer),
         technician_busy_ticks=json.dumps(busy_ticks),
         cost_reconciliation_error=env.metrics["objective"]
+        - env.metrics.get("waiting_cost", 0.0)
         - sum(
             env.metrics[k]
             for k in ("maintenance_cost", "unavailability_cost", "failure_cost")
