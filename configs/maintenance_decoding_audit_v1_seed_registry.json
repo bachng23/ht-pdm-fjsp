@@ -1,0 +1,9 @@
+{
+  "version": "maintenance_decoding_audit_v1",
+  "historical_registry": "maintenance_solver_comparison_v1_seed_registry.json",
+  "inherited_solver_panels": [[160000, 160010], [161000, 161016], [162000, 162010], [163000, 163032], [164000, 164020], [165000, 165050], [166000, 166001]],
+  "new_development_shocks": [170000],
+  "new_sealed_test_shocks": [171000, 171020],
+  "new_smoke_shocks": [173000, 173002],
+  "scope": "New shock values disjoint from declared historical and source panels; original checkpoint seeds and labeled profiles intentionally reused. Full test profiles already opened in source experiment."
+}
