@@ -9,7 +9,7 @@ from dataclasses import asdict
 import torch
 from tqdm.auto import tqdm
 
-from ht_pdm_fjsp.maintenance_solver_model import cohort_config
+from ht_pdm_fjsp.maintenance_solver_model import cohort_config, CONDITIONS
 from ht_pdm_fjsp.maintenance_solver_policy import feature_batch, INDEPENDENT
 from ht_pdm_fjsp.maintenance_dispatch import role_seed
 from ht_pdm_fjsp.maintenance_waiting import WaitingEnv
@@ -17,12 +17,17 @@ from ht_pdm_fjsp.maintenance_waiting import WaitingEnv
 REWARD_SCALE = 20.0
 
 
-def episode_spec(seed, index, horizon, forbidden, profile="full"):
+def episode_spec(seed, index, horizon, forbidden, profile="full", condition_schedule=None):
     cs = role_seed(seed, f"solver_comparison_v1_configuration:{index}")
     es = role_seed(seed, f"solver_comparison_v1_environment:{index}")
     if cs in forbidden or es in forbidden or cs == es:
         raise ValueError("training seed overlap with reserved/historical panel")
-    capacity = "nominal" if index % 5 == 0 else "specialized"
+    schedule = condition_schedule if condition_schedule is not None else (
+        "specialized", "specialized", "specialized", "specialized", "nominal"
+    )
+    if not schedule or any(c not in CONDITIONS for c in schedule) or index < 1:
+        raise ValueError("invalid training condition schedule")
+    capacity = schedule[(index - 1) % len(schedule)]
     return cohort_config(cs, capacity, horizon, split="train", profile=profile), capacity, cs, es
 
 
@@ -79,8 +84,10 @@ def fit(model, cfg, seed, forbidden, journals, on_checkpoint):
     minibatches = torch.Generator().manual_seed(
         role_seed(seed, "solver_comparison_v1_minibatches")
     )
+    seed_sequence = hashlib.sha256()
     episodes = steps = optimizer_steps = 0
-    mix = {"nominal": 0, "specialized": 0}
+    schedule = cfg.get("training_condition_schedule")
+    mix = {c: 0 for c in dict.fromkeys(schedule)} if schedule is not None else {"nominal": 0, "specialized": 0}
     updates = cfg["env_steps"] // cfg["rollout"]
     initial_parameters = {k: v.detach().clone() for k, v in model.state_dict().items()}
     for update in tqdm(
@@ -98,7 +105,7 @@ def fit(model, cfg, seed, forbidden, journals, on_checkpoint):
         model.eval()
         for _ in range(cfg["rollout"] // (b * horizon)):
             specs = [
-                episode_spec(seed, episodes + i + 1, horizon, forbidden, cfg["profile"])
+                episode_spec(seed, episodes + i + 1, horizon, forbidden, cfg["profile"], schedule)
                 for i in range(b)
             ]
             configs = [s[0] for s in specs]
@@ -140,6 +147,7 @@ def fit(model, cfg, seed, forbidden, journals, on_checkpoint):
             for i, (env, spec) in enumerate(zip(envs, specs, strict=True)):
                 episodes += 1
                 c, capacity, cs, es = spec
+                seed_sequence.update(f"{episodes}:{cs}:{es};".encode())
                 mix[capacity] += 1
                 if (
                     abs(
@@ -259,6 +267,7 @@ def fit(model, cfg, seed, forbidden, journals, on_checkpoint):
         raise RuntimeError("training budget/weight-update audit")
     return dict(
         train_seed=seed,
+        **({"training_seed_sequence_sha256": seed_sequence.hexdigest()} if schedule is not None else {}),
         env_steps=steps,
         episodes=episodes,
         optimizer_steps=optimizer_steps,
