@@ -63,7 +63,7 @@ def fit(model, cfg, seed, forbidden, journals, on_checkpoint):
     checkpoint_seconds = 0.0
     maximum_reward_error = 0.0
     independent = model.algorithm == INDEPENDENT
-    horizon = cfg["horizons"][0]
+    horizon = cfg.get("training_horizon", cfg["horizons"][0])
     b = cfg["vector_envs"]
     if (
         cfg["env_steps"] % cfg["rollout"]
@@ -85,6 +85,7 @@ def fit(model, cfg, seed, forbidden, journals, on_checkpoint):
         role_seed(seed, "solver_comparison_v1_minibatches")
     )
     seed_sequence = hashlib.sha256()
+    shared_prefix = hashlib.sha256()
     episodes = steps = optimizer_steps = 0
     schedule = cfg.get("training_condition_schedule")
     mix = {c: 0 for c in dict.fromkeys(schedule)} if schedule is not None else {"nominal": 0, "specialized": 0}
@@ -92,7 +93,7 @@ def fit(model, cfg, seed, forbidden, journals, on_checkpoint):
     initial_parameters = {k: v.detach().clone() for k, v in model.state_dict().items()}
     for update in tqdm(
         range(1, updates + 1),
-        desc=f"{model.algorithm} seed {seed}",
+        desc=f"{model.algorithm} seed {seed}" + (f" H{horizon}" if "training_horizon" in cfg else ""),
         unit="rollout",
         leave=False,
     ):
@@ -148,6 +149,8 @@ def fit(model, cfg, seed, forbidden, journals, on_checkpoint):
                 episodes += 1
                 c, capacity, cs, es = spec
                 seed_sequence.update(f"{episodes}:{cs}:{es};".encode())
+                if "paired_training_episodes" in cfg and episodes <= cfg["paired_training_episodes"]:
+                    shared_prefix.update(f"{episodes}:{cs}:{es};".encode())
                 mix[capacity] += 1
                 if (
                     abs(
@@ -268,6 +271,9 @@ def fit(model, cfg, seed, forbidden, journals, on_checkpoint):
     return dict(
         train_seed=seed,
         **({"training_seed_sequence_sha256": seed_sequence.hexdigest()} if schedule is not None else {}),
+        **({"training_shared_prefix_sha256": shared_prefix.hexdigest(),
+            "shared_prefix_episodes": cfg["paired_training_episodes"],
+            "training_horizon": horizon} if "paired_training_episodes" in cfg else {}),
         env_steps=steps,
         episodes=episodes,
         optimizer_steps=optimizer_steps,

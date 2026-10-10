@@ -12,6 +12,7 @@ import platform
 import shutil
 import subprocess
 import time
+import sys
 
 import numpy as np
 import torch
@@ -315,6 +316,11 @@ def evaluate(
             cohort=cs,
             condition=cond,
             horizon=h,
+            **(
+                {"training_horizon": cfg["training_horizons"].get(regime, -1)}
+                if "training_horizons" in cfg
+                else {}
+            ),
         ),
         model,
         tagged,
@@ -481,11 +487,16 @@ def summarize(rows, cfg):
     return paired, dict(contrasts=contrasts, aggregate=aggregates)
 
 
-def benchmark_latency(output, cfg, selected_refs, selections):
+def benchmark_latency(
+    output, cfg, selected_refs, selections, *, checkpoint_loader=None
+):
+    checkpoint_loader = checkpoint_loader or load_checkpoint
     states = []
     h = cfg["horizons"][0]
     shock = cfg["development_seeds"][0]
-    for cond in CONDITIONS:
+    for cond, h in itertools.product(
+        CONDITIONS, cfg.get("latency_horizons", cfg["horizons"][:1])
+    ):
         c = cohort_config(
             cfg["development_cohorts"][0], cond, h, profile=cfg["profile"]
         )
@@ -509,7 +520,7 @@ def benchmark_latency(output, cfg, selected_refs, selections):
     summaries = []
     for job in tqdm(jobs, desc="common-state latency", unit="controller"):
         model = (
-            load_checkpoint(output / job["checkpoint"])[0]
+            checkpoint_loader(output / job["checkpoint"])[0]
             if job["checkpoint"]
             else None
         )
@@ -548,6 +559,16 @@ def benchmark_latency(output, cfg, selected_refs, selections):
                             remaining=h,
                             seconds=seconds,
                             action=json.dumps(pairs),
+                            **(
+                                {
+                                    "training_horizon": cfg["training_horizons"].get(
+                                        job["training_regime"], -1
+                                    ),
+                                    "evaluation_horizon": c.horizon,
+                                }
+                                if "training_horizons" in cfg
+                                else {}
+                            ),
                         )
                     )
         summaries.append(
@@ -575,7 +596,25 @@ def benchmark_latency(output, cfg, selected_refs, selections):
     return len(rows)
 
 
-def run(output, profile):
+def cell_settings(cfg, regime):
+    return {
+        **cfg,
+        "training_regime": regime,
+        "training_condition_schedule": SCHEDULES[regime],
+    }
+
+
+def audit_sequence(sequences, record, cfg):
+    seed = record["train_seed"]
+    digest = record["training_seed_sequence_sha256"]
+    if seed in sequences and sequences[seed] != digest:
+        raise RuntimeError("unmatched training configuration/shock seed sequence")
+    sequences[seed] = digest
+
+
+def run(output, profile, *, protocol=None):
+    """Execute an explicit protocol module; defaults preserve coverage v1."""
+    engine = protocol or sys.modules[__name__]
     if output.exists() and any(output.iterdir()):
         raise ValueError("output must be new/empty; no resume")
 
@@ -585,13 +624,13 @@ def run(output, profile):
     dirty = git("status", "--porcelain")
     if profile == "full" and (platform.system() != "Linux" or dirty):
         raise ValueError("full requires human-run clean committed Linux lab checkout")
-    cfg = settings(profile)
+    cfg = engine.settings(profile)
     torch.set_num_threads(1)
-    audits, forbidden = seed_audit(cfg)
-    expected = counts(cfg)
+    audits, forbidden = engine.seed_audit(cfg)
+    expected = engine.counts(cfg)
     output.mkdir(parents=True, exist_ok=True)
     manifest = dict(
-        experiment=VERSION,
+        experiment=engine.VERSION,
         status="RUNNING",
         commit=git("rev-parse", "HEAD"),
         dirty=dirty,
@@ -615,17 +654,21 @@ def run(output, profile):
             *Path(__file__).parent.glob("maintenance_heterogeneous*.py"),
             *Path(__file__).parent.glob("maintenance_contention*.py"),
             Path(__file__),
+            Path(engine.__file__),
             ROOT / "src/ht_pdm_fjsp/maintenance_waiting.py",
             ROOT / "src/ht_pdm_fjsp/maintenance_dispatch.py",
             ROOT / "src/ht_pdm_fjsp/maintenance_dispatch_policy.py",
             ROOT / "src/ht_pdm_fjsp/maintenance_coordination_references.py",
             ROOT / "pyproject.toml",
             ROOT / "uv.lock",
-            ROOT / f"docs/{VERSION}_plan.md",
-            ROOT / f"configs/{VERSION}_seed_registry.json",
+            ROOT / f"docs/{engine.VERSION}_plan.md",
+            ROOT / f"configs/{engine.VERSION}_seed_registry.json",
             ROOT / f"configs/{base.VERSION}_seed_registry.json",
         ]
-        for p in sources:
+        sources.extend(
+            ROOT / "configs" / name for name in cfg.get("extra_snapshot_registries", [])
+        )
+        for p in dict.fromkeys(sources):
             shutil.copy2(p, snap / p.name)
         write_json(output / "benchmark_config.json", cfg)
         write_json(
@@ -693,6 +736,7 @@ def run(output, profile):
                     cohort=cs,
                     condition=cond,
                     horizon=cfg["horizons"][0],
+                    **({"training_horizon": -1} if "training_horizons" in cfg else {}),
                 ),
             )
             dev.append(row)
@@ -726,15 +770,11 @@ def run(output, profile):
         selections = {}
         development_count = len(dev)
         for regime, arm, seed in tqdm(
-            list(itertools.product(SCHEDULES, ARMS, cfg["train_seeds"])),
-            desc="coverage learning replicas",
+            list(itertools.product(engine.SCHEDULES, ARMS, cfg["train_seeds"])),
+            desc=cfg.get("replica_progress_label", "coverage learning replicas"),
             unit="model",
         ):
-            cell = {
-                **cfg,
-                "training_regime": regime,
-                "training_condition_schedule": SCHEDULES[regime],
-            }
+            cell = engine.cell_settings(cfg, regime)
             model = base.model_for(cell, seed, arm)
             digest = hashlib.sha256(
                 b"".join(
@@ -747,7 +787,7 @@ def run(output, profile):
             directory = output / regime / arm / f"train_seed_{seed}"
 
             def checkpoint(m, update, steps):
-                save_checkpoint(
+                engine.save_checkpoint(
                     directory / "checkpoints" / f"step_{steps:08d}.pt",
                     m,
                     cell,
@@ -759,19 +799,27 @@ def run(output, profile):
 
             checkpoint(model, 0, 0)
             training_journals = {
-                k: Tagged(journals[k], training_regime=regime)
+                k: Tagged(
+                    journals[k],
+                    training_regime=regime,
+                    **(
+                        {"training_horizon": cell["training_horizon"]}
+                        if "training_horizon" in cell
+                        else {}
+                    ),
+                )
                 for k in ("training_episodes", "training_progress")
             }
             record = fit(model, cell, seed, forbidden, training_journals, checkpoint)
-            sequence_digest = record["training_seed_sequence_sha256"]
-            if seed in sequence_hashes and sequence_hashes[seed] != sequence_digest:
-                raise RuntimeError(
-                    "unmatched training configuration/shock seed sequence"
-                )
-            sequence_hashes[seed] = sequence_digest
+            engine.audit_sequence(
+                sequence_hashes, {**record, "training_regime": regime}, cfg
+            )
             n = record["episodes"]
             expected_mix = Counter(
-                SCHEDULES[regime][(i - 1) % 5] for i in range(1, n + 1)
+                cell["training_condition_schedule"][
+                    (i - 1) % len(cell["training_condition_schedule"])
+                ]
+                for i in range(1, n + 1)
             )
             if record["mixture_counts"] != dict(expected_mix):
                 raise RuntimeError("training coverage mixture mismatch")
@@ -791,7 +839,7 @@ def run(output, profile):
                 directory / "checkpoints" / f"step_{cfg['env_steps']:08d}.pt",
                 directory / "model.pt",
             )
-            restored, payload = load_checkpoint(directory / "model.pt")
+            restored, payload = engine.load_checkpoint(directory / "model.pt")
             if payload["physical_steps"] != cfg["env_steps"]:
                 raise RuntimeError("nonfinal checkpoint")
             selections[f"{regime}:{arm}:{seed}"] = dict(
@@ -802,6 +850,11 @@ def run(output, profile):
                 checkpoint=str((directory / "model.pt").relative_to(output)),
                 checkpoint_sha256=file_hash(directory / "model.pt"),
                 selection="FINAL_ONLY",
+                **(
+                    {"training_horizon": cell["training_horizon"]}
+                    if "training_horizon" in cell
+                    else {}
+                ),
             )
             for cs, cond, shock in tqdm(
                 list(
@@ -829,7 +882,13 @@ def run(output, profile):
         write_json(output / "checkpoint_selection.json", selections)
         if len({r["parameter_count"] for r in coverage}) != 1:
             raise RuntimeError("unmatched parameter counts")
-        latency_count = benchmark_latency(output, cfg, selected_refs, selections)
+        latency_count = benchmark_latency(
+            output,
+            cfg,
+            selected_refs,
+            selections,
+            checkpoint_loader=engine.load_checkpoint,
+        )
         # This is the only point opening the new sealed full shock trajectories.
         pa.update(
             full_test_rollouts_opened=profile == "full",
@@ -850,9 +909,13 @@ def run(output, profile):
                 cfg["test_cohorts"], CONDITIONS, cfg["horizons"], cfg["test_seeds"]
             )
         )
-        for job in tqdm(jobs, desc="test coverage controllers", unit="controller"):
+        for job in tqdm(
+            jobs,
+            desc=cfg.get("test_progress_label", "test coverage controllers"),
+            unit="controller",
+        ):
             model = (
-                load_checkpoint(output / job["checkpoint"])[0]
+                engine.load_checkpoint(output / job["checkpoint"])[0]
                 if job["checkpoint"]
                 else None
             )
@@ -878,14 +941,24 @@ def run(output, profile):
                 journals["episodes"].add(row)
         journals["episodes"].close()
         shutil.copy2(output / "episodes.partial.csv", output / "episodes.csv")
-        paired, summary = summarize(rows, cfg)
+        paired, summary = engine.summarize(rows, cfg)
         write_csv(output / "paired_seed_metrics.csv", paired)
         summary["audits"] = dict(
             complete_grid=True,
             feasible_actions=True,
             request_cost_reconciliation=True,
             matched_initial_parameters=True,
-            matched_training_seed_sequences=True,
+            training_sequence_pairing=cfg.get(
+                "training_sequence_pairing", "identical_full_sequence"
+            ),
+            **(
+                {
+                    "matched_training_seed_prefix": True,
+                    "matched_training_sequences_within_regime": True,
+                }
+                if "training_horizons" in cfg
+                else {"matched_training_seed_sequences": True}
+            ),
             matched_parameter_counts=True,
             exact_training_budget=True,
             checkpoint_reload=True,
