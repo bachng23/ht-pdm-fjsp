@@ -1,0 +1,34 @@
+{
+  "scope": "Fresh shocks on familiar profiles; intentionally frozen historical training seeds.",
+  "historical_registry": "maintenance_training_horizon_v1_seed_registry.json",
+  "new_panels": [
+    [
+      204000,
+      204020
+    ],
+    [
+      205000,
+      205020
+    ],
+    [
+      206000,
+      206001
+    ],
+    [
+      207000,
+      207008
+    ],
+    [
+      209020,
+      209021
+    ],
+    [
+      209040,
+      209042
+    ],
+    [
+      209060,
+      209062
+    ]
+  ]
+}
